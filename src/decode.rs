@@ -34,7 +34,7 @@ pub fn decode(def: &SensorDef, words: &[u16]) -> Result<Value, DecodeError> {
     }
 
     let raw: f64 = match def.encoding {
-        Encoding::U16 => words[0]  as f64,
+        Encoding::U16 => words[0] as f64,
         Encoding::S16 => words[0] as i16 as f64,
         Encoding::U32 { base_word } => assemble(words, base_word) as f64,
         Encoding::S32 { base_word } => assemble(words, base_word) as i32 as f64,

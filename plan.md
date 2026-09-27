@@ -13,7 +13,6 @@
 ---
 
 ## Decisions log (2026-09-27 session)
-
 1. **YAML is out.** Map lives in TOML; HA gets JSON meta over the WS. The original "shared YAML artifact" idea is dead — the only shared thing is the JSON schema of `meta`.
 2. **kameo 0.22.2** for the actor system (verified healthy: updated 2026-07-18, ~887k downloads; core API read from vendored source in `~/.cargo/registry`). `kameo_actors` 0.8.1 available (pubsub/broker/message_bus modules exist; **their APIs have not been read yet — do so before using**).
 3. **Deploy = cross-compile + justfile.** No nix on the Pi. Static musl binary (`aarch64-unknown-linux-musl`) via cargo-zigbuild or nix `pkgsCross` — decide at first build. Plain systemd user service on the Pi.
@@ -22,13 +21,31 @@
 6. **Planning values get a typed boundary:** `PlanningSignals` (newtypes) extracted from the snapshot; the planner never sees the 84-sensor diagnostic surface.
 7. **base_word = LOW**, verified twice on hardware (see Verified section — and note the *original* capture in this plan was transposed; corrected below).
 
+## Decisions log (2026-09-28 session)
+
+1. **Partial poll failure = whole-cycle failure ("decision A").** Any span-read or sensor-decode error fails the poll; StateActor keeps the last good snapshot and flips `link_ok` only. Errors carry sensor name + address (coverage gap vs decode failure are distinct messages). Pinned by `tests/decode_all.rs::fails_loudly_when_a_span_is_missing`.
+2. **`decode_all` reassembles via a flat address→word `BTreeMap`**, not per-span slicing — immune to a sensor ever straddling the 64-reg chunk boundary (586–679 splits at 650). `words_at` deleted (tests/spans now 8/8).
+3. **Snapshot keyed by sensor name** — it's the meta↔state join key; `validate()` uniqueness makes it sound; HA entity `unique_id` = name. Address-keying saves zero bytes (JSON keys are strings anyway).
+4. **systemd unit split out of Task 2.1 → Task 0.4** — no WS dependency, and the 24 h soak should run under `Restart=always`, not tmux.
+5. **Backoff**: consecutive-failure exponent, cap 60 s; first retry paced by the regular ticker (no added delay) — avoids off-by-one tick-skips.
+6. **`top` dropped** (2026-09-28): `dump` + journald cover debugging; a live table was speculative debug surface.
+7. **axum 0.8.9** for the WS surface (2026-09-28, Phase 2): one router serves `/ws` upgrade + `GET /state /meta /directives`; tokio-tungstenite-direct rejected (hand-rolled upgrade + second listener for debug HTTP).
+8. **Fan-out = plain mpsc subscribers** in StateActor (NOT per-connection kameo actors, NOT kameo_actors pubsub — risk #8 closed as unused). Each connection: reader loop in the handler + one writer task owning the socket sink; all frames serialize through the writer via an mpsc channel. Dead/lagging subscriber = pruned on `try_send` failure.
+9. **Hello before Subscribe**, sent on the un-split socket: a push missed in the gap self-heals at the next tick — every state push carries full values + directives.
+10. **DirectivesActor commit order:** validate → persist → notify StateActor → commit memory. Persist failure rejects the cmd; corrupt `directives.json` refuses startup (loud). `version` is a change counter — no-op cmds ack ok with no bump/persist/push.
+11. **Protocol addition:** `{"type":"error","message":…}` server→client for malformed input (silent ignore would kill bring-up debugging).
+12. **`run` requires `-c` and a non-empty token** — refusing to bind 0.0.0.0 unauthenticated is a startup error.
+
 ## Engineering gotchas discovered (do not re-learn these)
 
 - **TOML integer keys don't deserialize into `BTreeMap<u16, _>`** ("invalid type: string, expected u16" — TOML keys are strings by spec). Options are therefore **arrays of `{ value, label }`** (`EnumOptions`). Same shape on the JSON meta.
 - **serde `deny_unknown_fields` does NOT fire inside internally-tagged enum variants** (verified live: `base_word` on a u16 entry was silently dropped). Fixed via deny-strict raw mirrors (`RawEncoding`, `RawConstraint`) + `deserialize_with` conversions that enforce field combinations and reject cross-kind fields. Bonus: errors carry TOML span positions. If a new tagged enum is ever added to the schema, it needs the same treatment.
 - **`#[serde(default)]` on `f64` yields 0.0, not 1.0** — scale uses `default = "unit"`.
 - **crane's `cleanCargoSource` drops `maps/`** — `include_str!("../maps/...")` breaks under `nix build`. The flake `src` filter must be widened when the cross-build is wired up. (Local `cargo` builds are unaffected.)
-- **Block reads:** sensors poll as 8 FC03 spans — (3) (20) (114) (210–220) (500) (514–541) (555–558) (586–679) — plus ~3 control read-back spans. The 586–679 span is 94 regs → **chunk at ≤64 regs per request**. Timing at 9600 8N1: ~1.15 ms/char, a 64-reg round-trip ≈ 200 ms incl. turnaround → ~11 blocks ≈ 2–3 s per cycle. Fits the 5 s interval; don't go below 5 s without re-measuring.
+- **Block reads:** measured span layout from `plan_spans` @ MERGE_GAP=8: **13 FC03 spans** — (3–7) (20–21) (80) (102–117) (128–130) (142–186) (210–220) (340) (500) (514–541) (555–558) (586–679) (650–679) — sensors ∪ control read-backs, gaps ≤8 dead regs bridged (the earlier "8 sensor + ~3 control spans" note undercounted; without bridging it's 33 requests). 586–679 is 94 regs → chunked **≤64 regs per request**. Timing at 9600 8N1: ~1.15 ms/char, a 64-reg round-trip ≈ 200 ms incl. turnaround → 13 blocks ≈ 2–3 s per cycle. Fits the 5 s interval; don't go below 5 s without re-measuring.
+- **kameo `ask` flattens `Result` replies:** with `type Reply = Result<T, E>` you get `Result<T, SendError<M, E>>` — the handler's error arrives as `SendError::HandlerError(e)`, no nested match.
+- **axum `WebSocket::recv` exists only pre-split**; after `split()` use `StreamExt::next` / `SinkExt::send`.
+- **Internally-tagged wire enums need `rename_all = "snake_case"`** or tags serialize as variant names (`"Hello"`, not `"hello"`) — and deserialization of `"cmd"` silently falls into the error arm. Caught by the e2e test, not by the compiler.
 
 ## Crate pins (checked 2026-09-27, all alive)
 
@@ -57,22 +74,24 @@
 ## Phase 0 — Build & deploy environment (anriha-pc + Pi)
 
 ### Task 0.1: User in dialout group — DONE 2026-09-27
-### Task 0.2: ~~Rust toolchain via nix on the Pi~~ → REPLACED: cross-compile on anriha-pc
-No nix on the Pi. Instead:
-- Add `aarch64-unknown-linux-musl` target (rust-overlay toolchain or cargo-zigbuild — decide at first build; both produce a static binary that runs on Pi OS trixie).
-- **Widen the crane source filter** so `maps/` survives `nix build` (see gotchas). Flake currently declares `systems = [ "x86_64-linux" ]` only — fine for building the cross artifact on this machine.
-- `justfile` recipes: `build` (debug/test), `build-arm` (aarch64 musl release), `deploy` (scp binary → Pi, restart service), `probe` (ssh + run probe), `test` (cargo test).
-Expected: `just build-arm && just deploy` ships a running binary; `file` reports static PIE.
+### Task 0.2: ~~Rust toolchain via nix on the Pi~~ → REPLACED: cross-compile on anriha-pc — **DONE 2026-09-27 (pkgsCross route)**
+- Decision: **pkgsCross + `aarch64-unknown-linux-musl`** (cargo-zigbuild rejected — keeps the build inside the existing nix/crane graph). Verified: `nix build .#solar-bridge-arm` → `file` reports static aarch64 ELF.
+- **Gotcha (rust-overlay × crossSystem):** applying rust-overlay inside the cross pkgs dispatches on hostPlatform → aarch64 toolchain *binaries* → `exec format error`. Toolchain must come from **nativePkgs** with `targets = [ "aarch64-unknown-linux-musl" ]`; the cross pkgs (no overlay) only feed `crane.mkLib` for the musl linker wrapper. (Same trap presumably applies to the qbittorrent_exporter pattern if its aarch64 image is ever built on x86_64.)
+- crane `src` filter widened (`filterCargoSources || maps/*.toml`) — `include_str!` survives `nix build`; both native and cross builds green.
+- `justfile`: `test` / `build` / `build-arm` / `deploy` (scp + atomic mv; systemd restart lands with Task 2.1) / `probe` (ssh passthrough). Pi coordinates centralized in the justfile header.
 
-### Task 0.3: Stable serial device name on the Pi — OPEN (do at first deploy)
-udev symlink `/dev/ttyRS485` for the CH340 dongle (vid 1a86 pid 7523 — verify with `udevadm info -a`). One-time ssh; config lives in the justfile/README, not nix.
+### Task 0.3: Stable serial device name on the Pi — READY (handed over 2026-09-28, one-time ssh)
+udev symlink `/dev/ttyRS485` for the CH340 dongle (vid 1a86 pid 7523 — verify first: `just udev-info`). `systemd/99-ttyrs485.rules` in repo; `just install-udev` ships it.
+
+### Task 0.4: systemd user unit — READY (handed over 2026-09-28, split from Task 2.1)
+`systemd/solar-bridge.service` (user service, `Restart=always`); `just install-unit` ships + enables. Needs `loginctl enable-linger konazumi` once (user service without a session). journald timestamps stderr — no in-code log timestamps needed.
 
 ---
 
 ## Phase 1 — Modbus communication working (Goal 1)
 
 ### Task 1.1: Wiring + link check — DONE 2026-09-27 (mbpoll reads OK, slave mode confirmed)
-### Task 1.2: Smoke test identity — DONE via mbpoll; Rust `probe` must reproduce (below)
+### Task 1.2: Smoke test identity — **DONE 2026-09-27** (mbpoll first, then Rust `probe` reproduced SN 2605096069 on the Pi — first Rust↔hardware contact; tokio-modbus risk #6 retired for reads)
 ### Task 1.3: Register map file — **DONE**
 `maps/sun_3ph_hybrid.toml`: 84 sensors, 46 controls. Every entry cross-checked against Developer089 + sunsynk and anchored to hardware captures (see comments inline). Notables:
 - `base_word = "low"` on all 32-bit entries (hardware-verified twice).
@@ -82,15 +101,15 @@ udev symlink `/dev/ttyRS485` for the CH340 dongle (vid 1a86 pid 7523 — verify 
 - PV3/PV4 skipped (12K has 2 MPPTs).
 ### Task 1.3b: Typed loader + strict validation — **DONE**
 `src/map.rs`: `RegisterMap`/`SensorDef`/`ControlDef`/`Encoding`/`Constraint`/`EnumOptions`, raw-mirror strict deserialization (see gotchas), `validate()` (unique names, options⇒u16, scale≠0, min<max, on≠off). `load_from_str` + `load(path)` + `EMBEDDED_MAP`. Tests: `tests/map_parse.rs` — **13/13 green**, incl. real reject-fixtures (TOML, not the old vacuous YAML ones) and corrected anchors.
-### Task 1.4: Poller with decoding — **IN PROGRESS (decode body pending)**
-- `src/decode.rs`: `Value` (Number/Text), `DecodeError`, `decode(&SensorDef, &[u16]) -> Result<Value>`. Contract: word-count check; options ⇒ enum-index lookup (no scale/offset); Str ⇒ big-endian byte pairs, trailing NULs trimmed, printable ASCII; numeric ⇒ sign per encoding, 32-bit assembled per `base_word` **before** sign extension, `value = (raw − offset) × scale`.
+### Task 1.4: Span planner + decoding — **DONE**
+- `src/decode.rs`: DONE (tests/decode.rs 11/11).
 - `tests/decode.rs`: 11 vectors = the contract. Anchors: 0x1545→54.45 V; 0xFFF6→−10 (s16); u16 never sign-extended (0xFFFF→65535); temp (1165−1000)×0.1→16.5; **u32 base-low**: (534,535)=(0x022E,0x0000)→55.8 kWh and (20,21)=(0xD4C0,0x0001)→12 000 W; base-high mirror assembly-only; s32 sign across words; options 2→"normal", 7→UnknownOption(7); SN words→"2605096069"; word-count error.
-- Block polling: group map addresses into contiguous FC03 spans, chunk ≤64 regs (see gotchas for spans/timing).
-### Task 1.5: Robustness — OPEN
-Reconnect with exponential backoff inside BusActor (drop + reopen serial; dongles hang after replug). `link_ok` in every snapshot; last-success timestamp. `config.toml`: port, baud, slave, interval, bind addr, token.
-### Task 1.6: CLI — OPEN
-`solar-bridge probe` (identity: read regs 3–7, assert SN 2605096069 — first cross-compiled run against real hardware), `top` (live decoded table), `dump` (one JSON snapshot to stdout). clap is already a dependency.
-### Task 1.7: Actor skeleton — OPEN (new)
+- `src/spans.rs`: DONE — `plan_spans(map, merge_gap)` + `MERGE_GAP = 8`. Single `chunk_by` pass over the deduped sorted address set, predicate `b − a ≤ merge_gap + 1` (adjacent diff = dead regs + 1, so G=0 = pure contiguity), runs chunked ≤64 regs via `step_by`. Real map @ G=8 → **13 spans** (largest: 586–679, 94 regs → 64+30); without bridging it would be 33 requests/cycle. `tests/spans.rs` 8/8: exactly-once coverage, G=0 exact-coverage property, sorted/disjoint/fully-bridged, chunk limit, hard 13-span layout anchor.
+- `words_at` — REMOVED 2026-09-28: `decode_all` builds a flat address→word map instead (see decisions 2026-09-28 #2).
+### Task 1.5: Robustness — **DONE (code)** 2026-09-28; Pi-side setup + soak pending
+Backoff: consecutive-failure exponent in BusActor (skip ticks until `next_attempt`; cap 60 s; first retry paced by the ticker — `backoff_delay` pure fn). `src/config.rs` (port, baud, slave, interval_secs, bind, token — strict TOML, `deny_unknown_fields`). CLI: `-c/-p/-s/-b` are **global** flags, computed once before dispatch; `-c` wins wholesale over flags. `link_ok` in every snapshot; last-success timestamp = `latest.ts` (derived). Example: `config.example.toml` — real config only on the Pi, never committed (token).
+### Task 1.6: CLI — **DONE** (probe + dump on hardware). `top` **DROPPED** 2026-09-28: `dump` + `just logs` (journald) cover debugging; a live table was speculative surface.
+### Task 1.7: Actor skeleton — **DONE 2026-09-28** (first hardware run via `dump`; kameo 0.22.2 core API verified from vendored source — risk #8 retired for core kameo)
 `src/bus.rs`: kameo `BusActor` — owns tokio-serial + tokio-modbus RTU client; interval poll; decode; `tell`s snapshot to StateActor. **No write handler in this phase** — the mailbox accepts reads' results only; the write message type arrives with Phase 3 so the planner is provably the first writer.
 `src/state.rs`: `StateActor` — caches latest snapshot + link_ok; subscriber fan-out (plain Vec of ActorRefs or kameo_actors pubsub — read its API first).
 
@@ -101,8 +120,8 @@ Reconnect with exponential backoff inside BusActor (drop + reopen serial; dongle
 ### Decision: Pi pushes state; HA sends commands (unchanged)
 Rejected alternatives (for the record): HA RESTful polling (ownership inversion), Pi POSTs to /api/states (orphaned entities), MQTT discovery (user preference), ser2net + HA modbus (violates single-master), Matter (immature + wrong semantics). Chosen: one bidirectional WS, bridge pushes, entities native in HA.
 
-### Task 2.1: Bridge WS server — OPEN
-Per-connection kameo actors (`src/server.rs`; tokio-tungstenite directly or axum — decide when wiring; no TLS needed). Bind 0.0.0.0:8300, bearer token on upgrade (query param or header).
+### Task 2.1: Bridge WS server — **DONE 2026-09-28** (code + e2e `tests/server.rs`; deployed to the Pi, websocat-verified on hardware)
+axum (`src/server.rs`): `/ws` upgrade (Bearer header or `?token=`) + `GET /state|/meta|/directives` on one router. Per-connection: reader loop + writer task over a split socket; pushes via mpsc subscribers in StateActor. hello/state/cmd/cmd_ack/ping/pong + `error` (see decisions #7–9, #11).
 Protocol (JSON, unchanged):
 ```
 server→client  {"type":"hello","meta":{...},"state":{...},"directives":{...}}
@@ -114,14 +133,15 @@ client→server  {"type":"ping"} / server→client {"type":"pong"}
 - `meta` = serde-serialized `RegisterMap` (+ controls + directives schema) — **JSON from Rust types, map-driven HA entities, zero hardcoded addresses**.
 - **Commands never write Modbus.** A `cmd` mutates directive state only. The server task has no write path to the bus by construction.
 - Directive state versioned, persisted (`directives.json`), echoed in `hello`/`cmd_ack`/`state`.
-- HTTP `GET /state|/meta|/directives` for curl-debug. systemd user service on the Pi (`Restart=always`).
+- HTTP `GET /state|/meta|/directives` for curl-debug. ~~systemd user service on the Pi~~ → unit landed as Task 0.4.
 Expected: `websocat` sees hello+stream; a manual `cmd` flips a directive and persists across restart.
 
 ### Task 2.2: Custom HA integration — OPEN
 `custom_components/solar_bridge/` (Python, aiohttp WS client, auto-reconnect, entities from `meta`; options arrive as `{value,label}` arrays). `link_ok` drives availability; one HA device; state_class per meta → Energy dashboard native. Install via `ssh hassio@192.168.1.187` or Samba addon.
 ### Task 2.3: Energy dashboard readiness — OPEN
 Cumulative registers exposed `state_class: total_increasing` (already set in the map); wire solar/grid/battery in/out; sanity-check 24 h curves.
-### Task 2.4: HA → Pi directives — OPEN (in scope per decision)
+### Task 2.4: HA → Pi directives — **DONE 2026-09-28** (contract frozen; consumed only in Phase 3)
+`src/directives.rs`: typed `Directives` (version counter, ForceMode enum, `Option<Percent>` 0–100, `Option<Price>` sign-free ±10k) + `ApplyError`, atomic `directives.json` persistence (corrupt file refuses startup), `DirectivesActor` (persist-before-commit, no-op cmds change nothing). Tests: `tests/directives.rs` 10/10.
 Directive schema: `planner_enabled` (bool), `force_mode` (auto|charge|discharge|hold), `soc_target_hold` (0–100|null), `price_override` (CZK/kWh|null). Validated against schema, persisted, acked with full state. Consumed only in Phase 3 — contract frozen now. HA side: switch/select/number entities from meta's directives section; displayed state from pushes, never optimistic.
 
 ---
@@ -149,28 +169,35 @@ Coupling test: synthesize a full register image over the real map (zeros, first 
 ## Files (current + planned)
 
 ```
-Cargo.toml  flake.nix  justfile (planned)  config.toml (planned)
+Cargo.toml  flake.nix  justfile  config.example.toml
 maps/sun_3ph_hybrid.toml       # register map — DONE, 84 sensors / 46 controls
-src/main.rs                    # CLI: probe | top | dump | serve (clap; minimal now)
-src/lib.rs                     # pub mod decode, map (+ telemetry, bus, state, server, directives later)
+src/main.rs                    # CLI: probe | run | dump (global -c/-p/-s/-b flags)
+src/lib.rs
 src/map.rs                     # types + strict loader + validate — DONE
-src/decode.rs                  # decode — IN PROGRESS (todo! body)
-src/telemetry.rs               # planned: Snapshot, PlanningSignals, newtypes
-src/bus.rs                     # planned: BusActor (sole serial owner)
-src/state.rs                   # planned: StateActor
-src/server.rs                  # planned: WS connection actors + HTTP debug
-src/directives.rs              # planned: directive schema, validation, persistence
-tests/decode.rs                # 11-vector contract — present
+src/decode.rs                  # decode — DONE (11/11)
+src/spans.rs                   # span planner (plan_spans, MERGE_GAP) — DONE
+src/config.rs                  # Task 1.5 — DONE (strict TOML + defaults)
+src/telemetry.rs               # DONE — Snapshot (PlanningSignals lands with Phase 3)
+src/bus.rs                     # DONE — connect/read_span/poll_once/decode_all/BusActor + backoff
+src/state.rs                   # DONE — StateActor (Update, GetState/Status)
+src/protocol.rs                 # DONE — wire types (StatePayload, ServerMsg, ClientMsg)
+src/server.rs                   # DONE — axum WS + HTTP debug (2.1)
+src/directives.rs               # DONE — directive schema, validation, persistence, actor (2.4)
+tests/decode.rs                # 11-vector contract — green
 tests/map_parse.rs             # 13 strict-loading tests — green
-systemd/solar-bridge.service   # planned (plain user service, no nix)
+tests/spans.rs                 # 8 span-layout tests — green
+tests/decode_all.rs            # 2 — synthetic-image coupling + loud failure — green
+tests/backoff.rs, tests/config.rs, tests/directives.rs, tests/server.rs # DONE — green (4/5/10/3)
+systemd/99-ttyrs485.rules      # Task 0.3 — in repo; Pi install pending (just install-udev)
+systemd/solar-bridge.service   # Task 0.4 — in repo; Pi install pending (just install-unit + linger)
 # on the HA box: /config/custom_components/solar_bridge/
 ```
 
 ## Validation summary
 
 - Phase 0: `just build-arm` produces static aarch64 binary; `just deploy` runs it on the Pi.
-- Phase 1: `cargo test` green (map 13/13, decode 11/11); `probe` prints SN 2605096069 from Rust; `top` matches LCD/SolarMAN; 24 h soak survives dongle replug without restart.
-- Phase 2: HA entities stream live over WS (no polling); unavailable within a minute of bridge stop; Energy dashboard curves after 24 h; HA toggle → cmd → ack → directive persisted across restart.
+- Phase 1: `cargo test` green (map 13/13, decode 11/11, spans 8/8, decode_all 2/2); `probe` prints SN 2605096069 from Rust; `dump` produced a full snapshot on the Pi 2026-09-28; remaining: 24 h soak under the systemd unit surviving dongle replug (`top` dropped — see decisions #6).
+- Phase 2 (2026-09-28): bridge side green — 43/43 tests incl. WS e2e (hello/ping/cmd→ack+push/persist/auth-reject); `nix build .#solar-bridge-arm` static; deployed, websocat hello + stream verified from the tailnet. Pending: 2.2 HA integration entities live over WS, unavailable within a minute of bridge stop; Energy dashboard curves after 24 h; HA toggle → cmd → ack → directive persisted across restart.
 - Sign conventions confirmed under real import/export and charge/discharge before Phase 3 trusts them.
 
 ## Verified on hardware (2026-09-27)
@@ -194,5 +221,5 @@ systemd/solar-bridge.service   # planned (plain user service, no nix)
 5. **Sentinel values** (0xFFFF = unset on 77): needs a schema concept (`sentinel:` field → Text("unset") or Option) before exposing such controls.
 6. **tokio-modbus maturity** on Deye specifically: mitigate with mbpoll ground truth during bring-up (`probe` cross-check). Pin crates via Cargo.lock.
 7. **WS keepalive over tailnet**: ping/pong ~30 s; integration reconnects on drop.
-8. **kameo_actors APIs unread** — verify from vendored source before use; plain ActorRef fan-out is the fallback.
+8. ~~**kameo_actors APIs unread**~~ — closed 2026-09-28: not used; plain mpsc subscriber fan-out (decision #8).
 9. ~~HA on tailnet~~ — resolved. ~~Register addresses~~ — verified. ~~Word order~~ — verified low. ~~serde strictness~~ — solved via raw mirrors.

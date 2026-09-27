@@ -1,5 +1,5 @@
 {
-  description = "rust project";
+  description = "solar controller bridge (Deye RS485 -> WebSocket)";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -17,21 +17,39 @@
     inputs:
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" ];
+
       imports = [
         inputs.process-compose-flake.flakeModule
       ];
 
       perSystem =
-        { pkgs, system, ... }:
+        {
+          pkgs,
+          system,
+          ...
+        }:
         let
           inherit (pkgs) lib;
 
-          pkgsWithRust = import inputs.nixpkgs {
+          # Native builds + devshell: host pkgs with the rust overlay.
+          nativePkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [ (import inputs.rust-overlay) ];
           };
 
-          rustToolchain = pkgsWithRust.rust-bin.stable.latest.default.override {
+          # Cross builds for the Pi: aarch64 musl -> fully static binary
+          # that runs on Raspberry Pi OS trixie without any nix there.
+          # NOTE: no rust-overlay here - under crossSystem the overlay would
+          # dispatch on hostPlatform and yield aarch64 toolchain *binaries*
+          # (exec format error on x86_64). The toolchain must come from
+          # nativePkgs; only crane.mkLib uses this package set (for the
+          # musl linker wrapper).
+          armPkgs = import inputs.nixpkgs {
+            inherit system;
+            crossSystem.config = "aarch64-unknown-linux-musl";
+          };
+
+          nativeToolchain = nativePkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
               "rust-analyzer"
@@ -39,37 +57,53 @@
               "rustfmt"
             ];
           };
+          # x86_64 binaries + aarch64-musl std: cross-capable toolchain.
+          armToolchain = nativePkgs.rust-bin.stable.latest.default.override {
+            targets = [ "aarch64-unknown-linux-musl" ];
+          };
 
-          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
-          src = craneLib.cleanCargoSource ./.;
+          craneLibNative = (inputs.crane.mkLib nativePkgs).overrideToolchain nativeToolchain;
+          craneLibArm = (inputs.crane.mkLib armPkgs).overrideToolchain armToolchain;
+
+          # cleanCargoSource drops maps/ - include_str!("../maps/...") needs it.
+          src = lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              (craneLibNative.filterCargoSources path type)
+              || (builtins.match ".*/maps/.*\\.toml$" path != null);
+          };
 
           commonArgs = {
             inherit src;
             strictDeps = true;
-            buildInputs = [ ] ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
+            buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
           };
 
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-          my-crate = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+          nativeDeps = craneLibNative.buildDepsOnly commonArgs;
+          native = craneLibNative.buildPackage (commonArgs // {
+            cargoArtifacts = nativeDeps;
+          });
 
-          nativeLibs = with pkgs; [ ];
+          armDeps = craneLibArm.buildDepsOnly (commonArgs // { doCheck = false; });
+          solar-bridge-arm = craneLibArm.buildPackage (commonArgs // {
+            cargoArtifacts = armDeps;
+            doCheck = false; # cross binary can't run on x86_64
+          });
         in
         {
-          packages.default = my-crate;
+          packages.default = native;
+          packages.solar-bridge-arm = solar-bridge-arm;
+
           apps.default = {
             type = "app";
-            program = lib.getExe my-crate;
+            program = lib.getExe native;
           };
 
-          devShells.default = craneLib.devShell {
+          devShells.default = craneLibNative.devShell {
             checks = inputs.self.checks.${system};
-            packages =
-              with pkgs;
-              [
-              ]
-              ++ nativeLibs;
-
-            env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath nativeLibs;
+            packages = with pkgs; [
+              just
+            ];
           };
 
           process-compose."services" = {

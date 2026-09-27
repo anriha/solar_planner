@@ -1,0 +1,3 @@
+# CH340 USB-serial dongle = the RS485 bus. Stable name for config + unit.
+# Verify vid/pid on the real dongle first: just udev-info
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="2109", ATTRS{idProduct}=="3431", SYMLINK+="ttyRS485"

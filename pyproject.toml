@@ -1,0 +1,19 @@
+[project]
+name = "solar-controller"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Antonín Říha", email = "antonin.riha@protonmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.14.3",
+]
+
+[project.scripts]
+solar-controller = "solar_controller:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"

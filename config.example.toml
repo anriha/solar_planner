@@ -1,0 +1,6 @@
+port = "/dev/ttyRS485"
+baud = 9600
+slave = 1
+interval_secs = 5
+bind = "0.0.0.0:8300"
+token = ""

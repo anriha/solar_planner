@@ -1,0 +1,40 @@
+# Deye solar bridge - build / deploy / probe recipes (plan.md Task 0.2).
+# Pi coordinates live here, not scattered through recipes or the code.
+
+pi_host := "konazumi@100.64.0.3"
+remote_dir := "solar-bridge"
+remote_bin := remote_dir + "/solar_controller"
+
+default:
+    @just --list
+
+test:
+    cargo test
+
+build:
+    nix build .#default
+
+# aarch64 musl static binary for the Pi
+build-arm:
+    nix build .#solar-bridge-arm
+
+deploy: build-arm
+    ssh {{ pi_host }} "mkdir -p {{ remote_dir }}"
+    scp result/bin/solar_controller {{ pi_host }}:{{ remote_bin }}.new
+    ssh {{ pi_host }} "mv {{ remote_bin }}.new {{ remote_bin }} && systemctl --user restart solar-bridge"
+
+probe *args:
+    ssh {{ pi_host }} "{{ remote_bin }} probe {{ args }}"
+
+dump:
+    ssh {{ pi_host }} "{{ remote_bin }} dump"
+
+install-udev:
+    scp systemd/99-ttyrs485.rules {{ pi_host }}:/tmp/99-ttyrs485.rules
+    ssh -t {{ pi_host }} "sudo mv /tmp/99-ttyrs485.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
+
+install-unit:
+    ssh {{ pi_host }} "mkdir -p ~/.config/systemd/user"
+    scp systemd/solar-bridge.service {{ pi_host }}:.config/systemd/user/solar-bridge.service
+    ssh {{ pi_host }} "systemctl --user daemon-reload && systemctl --user enable --now solar-bridge"
+    @echo "if not done yet: ssh -t {{ pi_host }} 'sudo loginctl enable-linger konazumi'"
