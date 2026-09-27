@@ -1,0 +1,220 @@
+# Deye SUN-12K-SG05LP3-EU-SM2 (3-phase LV hybrid) register map.
+# The single contract artifact: the Rust bridge parses/serves it, the HA
+# integration builds entities from the JSON meta it receives over the WS.
+# Unknown fields are rejected at load (deny_unknown_fields) - a typo is a
+# startup failure, not a silent default.
+#
+# Sources: Developer089/deye-modbus-ha sun_3ph_hybrid.yaml (derived from
+# Deye's official 3-phase protocol doc), cross-checked against
+# kellerza/sunsynk three_phase_common.py / three_phase_lv.py.
+# Entries marked VERIFIED were value-checked on this hardware 2026-09-27
+# (mbpoll captures, plan.md "Verified on hardware").
+#
+# Decoding contract:
+#   value = (raw - offset) * scale        # temperatures: offset 1000, scale 0.1
+#   s16/s32: two's complement             # grid/battery power & current
+#   32-bit: base_word = which 16-bit word sits at the sensor's own address.
+#     VERIFIED LOW on hardware 2026-09-27, twice: (20,21)=(0xD4C0,0x0001)
+#     -> 0x0001D4C0 = 120000 -> 12000.0 W rated power; (534,535)=(0x022E,
+#     0x0000) -> 558 -> 55.8 kWh PV total. Matches Developer089 low_high
+#     and sunsynk.
+#   options present -> raw is an enum index, decoded to the mapped string
+#   str: N words, 2 ASCII chars per word, high byte first, NULs trimmed
+#
+# Sign conventions to verify under real load (plan open items):
+#   grid_power_total 619: import = positive (per Developer089, unverified)
+#   battery 590/591: sunsynk applies negative scale (native flip? unverified)
+#
+# TODO firmware version registers: probed 2026-09-27 - candidate block
+# 542-547 reads ~zeros, NOT versions. Best candidate is reg 22 = 0x0203
+# (plausible "V2.03") - compare against LCD version screen and add.
+
+sensors = [
+  # ------------------------------------------------------------- identity
+  { name = "serial_number", address = 3, encoding = { type = "str", words = 5 } },                                              # VERIFIED: 2605096069
+  { name = "rated_power", address = 20, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "W" },            # sunsynk (20,21); expect ~12000 W
+  { name = "run_state", address = 500, encoding = { type = "u16" }, options = [ { value = 0, label = "standby" }, { value = 1, label = "self_check" }, { value = 2, label = "normal" }, { value = 3, label = "alarm" }, { value = 4, label = "fault" } ] },  # VERIFIED: 2 = normal
+  # sunsynk FaultSensor(555-558): 64-bit fault bitmask, bit meanings in the
+  # Deye fault table. Raw exposure for now; decode to named bits later.
+  { name = "fault_code_1", address = 555, encoding = { type = "u16" } },
+  { name = "fault_code_2", address = 556, encoding = { type = "u16" } },
+  { name = "fault_code_3", address = 557, encoding = { type = "u16" } },
+  { name = "fault_code_4", address = 558, encoding = { type = "u16" } },
+
+  # -------------------------------------------------------- temperatures
+  { name = "dc_temperature", address = 540, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },    # VERIFIED 25.0
+  { name = "radiator_temperature", address = 541, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },  # VERIFIED 38.5
+  { name = "battery_temperature", address = 586, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },  # VERIFIED 16.5
+
+  # ------------------------------------------------------------ battery 1
+  { name = "battery_soc", address = 588, encoding = { type = "u16" }, unit = "%", device_class = "battery", state_class = "measurement" },                       # VERIFIED 100
+  { name = "battery_voltage", address = 587, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },    # VERIFIED 54.45
+  { name = "battery_current", address = 591, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },    # VERIFIED +0.07; sign conv TODO
+  { name = "battery_power", address = 590, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                      # sign conv TODO
+  { name = "battery_capacity_ah", address = 592, encoding = { type = "u16" }, unit = "Ah" },
+  { name = "battery_charge_efficiency", address = 114, encoding = { type = "u16" }, scale = 0.1, unit = "%" },                                                  # sunsynk; unverified
+
+  # ------------------------------------------ battery 2 (unpopulated on single-battery systems)
+  { name = "battery2_soc", address = 589, encoding = { type = "u16" }, unit = "%", device_class = "battery", state_class = "measurement" },
+  { name = "battery2_voltage", address = 593, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "battery2_current", address = 594, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "battery2_power", address = 595, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "battery2_temperature", address = 596, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },
+
+  # BMS mirror (inverter's cached copy of battery-BMS data via ITS OWN
+  # battery port - reading these is safe, does NOT touch the BMS bus)
+  { name = "bms_charge_voltage", address = 210, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "bms_discharge_voltage", address = 211, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "bms_charge_current_limit", address = 212, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_discharge_current_limit", address = 213, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_soc", address = 214, encoding = { type = "u16" }, unit = "%", device_class = "battery", state_class = "measurement" },
+  { name = "bms_voltage", address = 215, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "bms_current", address = 216, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_temperature", address = 217, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },
+  { name = "bms_max_charge_current", address = 218, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_max_discharge_current", address = 219, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_alarm_flag", address = 220, encoding = { type = "u16" } },
+
+  # ------------------------------------- grid / external CT-meter block
+  # OPEN ITEM: whole block read ~zero on 2026-09-27 - CT/meter wiring or
+  # inverter "Meter Select" setting unconfirmed. Verify under real flow.
+  { name = "grid_voltage_l1", address = 598, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "grid_voltage_l2", address = 599, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "grid_voltage_l3", address = 600, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "grid_frequency", address = 609, encoding = { type = "u16" }, scale = 0.01, unit = "Hz", device_class = "frequency", state_class = "measurement" },
+  { name = "grid_current_l1", address = 613, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "grid_current_l2", address = 614, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "grid_current_l3", address = 615, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "grid_power_l1", address = 616, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "grid_power_l2", address = 617, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "grid_power_l3", address = 618, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "grid_power_total", address = 619, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                  # import=positive per Developer089, VERIFY
+  { name = "grid_internal_power_total", address = 607, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+
+  # ---------------------------------------------------- inverter output
+  { name = "inverter_voltage_l1", address = 627, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },  # VERIFIED 227.7
+  { name = "inverter_voltage_l2", address = 628, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },  # VERIFIED 230.0
+  { name = "inverter_voltage_l3", address = 629, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },  # VERIFIED 230.0
+  { name = "inverter_current_l1", address = 630, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "inverter_current_l2", address = 631, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "inverter_current_l3", address = 632, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "inverter_power_total", address = 636, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },               # VERIFIED +2001
+  { name = "inverter_frequency", address = 638, encoding = { type = "u16" }, scale = 0.01, unit = "Hz", device_class = "frequency", state_class = "measurement" },  # VERIFIED 50.00
+
+  # ---------------------------------------------------------------- load
+  { name = "load_voltage_l1", address = 644, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "load_voltage_l2", address = 645, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "load_voltage_l3", address = 646, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "load_power_l1", address = 650, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "load_power_l2", address = 651, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "load_power_l3", address = 652, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "load_power_total", address = 653, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                   # VERIFIED +2001
+  { name = "load_frequency", address = 655, encoding = { type = "u16" }, scale = 0.01, unit = "Hz", device_class = "frequency", state_class = "measurement" },
+
+  # ------------------------------------------------- backup / generator
+  { name = "ups_power_total", address = 643, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "gen_voltage_l1", address = 661, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "gen_power_total", address = 667, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+
+  # ------------------------------------------- PV (2 MPPTs on the 12K; PV3/4 regs exist but stay unpopulated - skipped)
+  { name = "pv1_power", address = 672, encoding = { type = "u16" }, unit = "W", device_class = "power", state_class = "measurement" },                          # VERIFIED V*I = P
+  { name = "pv1_voltage", address = 676, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "pv1_current", address = 677, encoding = { type = "u16" }, scale = 0.1, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "pv2_power", address = 673, encoding = { type = "u16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "pv2_voltage", address = 678, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },
+  { name = "pv2_current", address = 679, encoding = { type = "u16" }, scale = 0.1, unit = "A", device_class = "current", state_class = "measurement" },
+
+  # ------------------------------------------- daily energy (0.1 kWh)
+  { name = "pv_energy_today", address = 529, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },      # VERIFIED 28.1
+  { name = "pv1_energy_today", address = 530, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "pv2_energy_today", address = 531, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "battery_charge_today", address = 514, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "battery_discharge_today", address = 515, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "grid_import_today", address = 520, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "grid_export_today", address = 521, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "load_energy_today", address = 526, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "gen_energy_today", address = 536, encoding = { type = "u16" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+
+  # ------------------------------------------- cumulative energy (u32, base_word: low, 0.1 kWh)
+  { name = "pv_energy_total", address = 534, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },  # VERIFIED 55.8
+  { name = "battery_charge_total", address = 516, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "battery_discharge_total", address = 518, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "grid_import_total", address = 522, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "grid_export_total", address = 524, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+  { name = "load_energy_total", address = 527, encoding = { type = "u32", base_word = "low" }, scale = 0.1, unit = "kWh", device_class = "energy", state_class = "total_increasing" },
+]
+
+controls = [
+  # -------------------------------------------------- on/off and modes
+  { name = "inverter_onoff", address = 80, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "solar_sell", address = 145, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "grid_charge_enable", address = 130, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "gen_charge_enable", address = 129, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "work_mode", address = 142, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "selling_first" }, { value = 1, label = "zero_export_load" }, { value = 2, label = "zero_export_ct" } ] } },
+
+  # ------------------------------------------------------- power limits
+  # CONFLICT: 340 is "Max Sell Power" per Developer089 but "Max Solar Power"
+  # per sunsynk. Resolve by reading it back and comparing to the LCD.
+  { name = "max_sell_power", address = 340, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "max_grid_output_power", address = 143, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  # DISABLED: live readback = 0xFFFF (unset sentinel -> 6553.5 with scale).
+  # Needs sentinel handling (0xFFFF = "off") before exposure. Developer089
+  # only, unverified against LCD.
+  # { name = "active_power_regulation", address = 77, encoding = { type = "u16" }, scale = 0.1, unit = "%", constraint = { type = "number", min = 0, max = 120 } },
+
+  # ------------------------------------- battery setup
+  # Live readback 2026-09-27: 108=109=200 A (device default) - max raised to
+  # 240 (sunsynk's limit for LV hybrids) so readback never violates constraint.
+  { name = "batt_max_charge_current", address = 108, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 240 } },
+  { name = "batt_max_discharge_current", address = 109, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 240 } },
+  { name = "grid_charge_current", address = 128, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 185 } },
+  { name = "batt_capacity_ah", address = 102, encoding = { type = "u16" }, unit = "Ah", constraint = { type = "number", min = 0, max = 2000 } },
+  { name = "batt_shutdown_soc", address = 115, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "batt_restart_soc", address = 116, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  # planner must enforce shutdown(115) <= low(117) <= restart(116)
+  { name = "batt_low_soc", address = 117, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+
+  # ------------------------------------------------ grid protection window
+  # TODO verify semantics: live readback 185 = 276.0 V, 186 = 103.5 V - the
+  # 186 value is far below any plausible 3-phase low-voltage limit (may be
+  # per-cell or a different parameter). Constraints widened to cover actual
+  # device values; re-tighten after checking the LCD grid-protection screen.
+  { name = "grid_voltage_high_limit", address = 185, encoding = { type = "u16" }, scale = 0.1, unit = "V", constraint = { type = "number", min = 0, max = 300 } },
+  { name = "grid_voltage_low_limit", address = 186, encoding = { type = "u16" }, scale = 0.1, unit = "V", constraint = { type = "number", min = 0, max = 300 } },
+
+  # -------------------------------------- time-of-use slots (6 programs)
+  # Times are plain HHMM integers (e.g. 630 = 06:30); planner formats/encodes.
+  # 172-177 CAVEAT: sunsynk decodes these as packed bitfields (charge bits
+  # 0-1, mode bits 2-4, sell bit 5), Developer089 as plain 0-3 selects.
+  # Verify via read-back vs LCD before any write.
+  { name = "tou_time_1", address = 148, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_2", address = 149, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_3", address = 150, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_4", address = 151, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_5", address = 152, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_6", address = 153, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_power_1", address = 154, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_2", address = 155, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_3", address = 156, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_4", address = 157, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_5", address = 158, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_6", address = 159, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_voltage_1", address = 160, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_2", address = 161, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_3", address = 162, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_4", address = 163, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_5", address = 164, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_6", address = 165, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_soc_1", address = 166, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_2", address = 167, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_3", address = 168, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_4", address = 169, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_5", address = 170, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_6", address = 171, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_charge_source_1", address = 172, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_2", address = 173, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_3", address = 174, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_4", address = 175, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_5", address = 176, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_6", address = 177, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+]
