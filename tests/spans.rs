@@ -6,7 +6,7 @@ use solar_controller::spans::{self, ReadSpan};
 // The poll-cycle layout constant: bridge gaps up to this many dead registers.
 // Rationale (plan.md gotchas): at 9600 8N1 a dead reg costs ~2.3 ms of response
 // payload vs ~35-50 ms fixed per extra FC03 request. With G=8 the embedded map
-// yields 13 spans; without bridging it would be 33 requests per cycle.
+// yields 12 spans; without bridging it would be 37 requests per cycle.
 const MERGE_GAP: u16 = 8;
 
 fn embedded() -> RegisterMap {
@@ -112,18 +112,18 @@ fn embedded_map_respects_chunk_limit() {
 
 #[test]
 fn embedded_map_matches_plan_layout() {
-    // The contract against plan.md's poll-cycle enumeration (8 sensor spans
-    // + control read-backs, 586-679 chunked at <= 64). Any map edit that
-    // changes the layout must update this - and the timing estimate.
+    // The contract against plan.md's poll-cycle enumeration (12 FC03 spans
+    // incl. control read-backs; 99-191 and 586-679 chunked at <= 64). Any
+    // map edit that changes the layout must update this - and the timing
+    // estimate.
     let got = pairs(&plan(&embedded(), MERGE_GAP));
     let expected: Vec<(u16, u16)> = vec![
         (3, 5),    // serial number
         (20, 2),   // rated power
         (80, 1),   // inverter_onoff
-        (102, 16), // battery setup + SOC thresholds (102..=117)
-        (128, 3),  // charge enables + grid charge current
-        (142, 45), // work mode .. grid protection (142..=186, TOU inside)
-        (210, 11), // BMS mirror
+        (99, 64),  // battery/settings + TOU head (99..=162)
+        (163, 29), // TOU tail + grid protection + peak shaving (163..=191)
+        (209, 12), // UPS delay + BMS mirror (209..=220)
         (340, 1),  // max sell power (naming conflict, read-back only)
         (500, 1),  // run state
         (514, 28), // energy block (514..=541, bridged over 532-533/537-539)

@@ -58,8 +58,8 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
 
     let hello = recv_json(&mut ws).await;
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["meta"]["sensors"].as_array().unwrap().len(), 84);
-    assert_eq!(hello["meta"]["controls"].as_array().unwrap().len(), 46);
+    assert_eq!(hello["meta"]["sensors"].as_array().unwrap().len(), 90);
+    assert_eq!(hello["meta"]["controls"].as_array().unwrap().len(), 64);
     assert_eq!(hello["state"]["link_ok"], false);
     assert_eq!(hello["directives"]["force_mode"], "auto");
 
