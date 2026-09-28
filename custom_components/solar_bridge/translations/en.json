@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Connect to the solar-bridge WebSocket on the Raspberry Pi.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "Access token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the bridge",
+      "invalid_auth": "The bridge rejected the token",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This inverter is already configured"
+    }
+  }
+}

@@ -68,9 +68,9 @@
           # cleanCargoSource drops maps/ - include_str!("../maps/...") needs it.
           src = lib.cleanSourceWith {
             src = ./.;
-            filter = path: type:
-              (craneLibNative.filterCargoSources path type)
-              || (builtins.match ".*/maps/.*\\.toml$" path != null);
+            filter =
+              path: type:
+              (craneLibNative.filterCargoSources path type) || (builtins.match ".*/maps/.*\\.toml$" path != null);
           };
 
           commonArgs = {
@@ -80,15 +80,21 @@
           };
 
           nativeDeps = craneLibNative.buildDepsOnly commonArgs;
-          native = craneLibNative.buildPackage (commonArgs // {
-            cargoArtifacts = nativeDeps;
-          });
+          native = craneLibNative.buildPackage (
+            commonArgs
+            // {
+              cargoArtifacts = nativeDeps;
+            }
+          );
 
           armDeps = craneLibArm.buildDepsOnly (commonArgs // { doCheck = false; });
-          solar-bridge-arm = craneLibArm.buildPackage (commonArgs // {
-            cargoArtifacts = armDeps;
-            doCheck = false; # cross binary can't run on x86_64
-          });
+          solar-bridge-arm = craneLibArm.buildPackage (
+            commonArgs
+            // {
+              cargoArtifacts = armDeps;
+              doCheck = false; # cross binary can't run on x86_64
+            }
+          );
         in
         {
           packages.default = native;
@@ -101,9 +107,21 @@
 
           devShells.default = craneLibNative.devShell {
             checks = inputs.self.checks.${system};
+
             packages = with pkgs; [
               just
+              uv
             ];
+
+            # env = {
+            #   UV_PYTHON_PREFERENCE = "only-system";
+            #   UV_PYTHON = pkgs.python313.interpreter;
+            # };
+            #
+            # shellHook = ''
+            #   uv sync --quiet
+            #   source .venv/bin/activate
+            # '';
           };
 
           process-compose."services" = {

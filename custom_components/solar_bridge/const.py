@@ -1,0 +1,10 @@
+DOMAIN = "solar_bridge"
+
+CONF_HOST = "host"
+CONF_PORT = "port"
+CONF_TOKEN = "token"
+
+DEFAULT_PORT = 8300
+
+MANUFACTURER = "Deye"
+MODEL = "SUN-12K-SG05LP3-EU-SM2"
