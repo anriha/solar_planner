@@ -1,4 +1,4 @@
-port = "/dev/ttyRS485"
+port = "/dev/ttySC0"
 baud = 9600
 slave = 1
 interval_secs = 5

@@ -1,7 +1,7 @@
 # Deye solar bridge - build / deploy / probe recipes (plan.md Task 0.2).
 # Pi coordinates live here, not scattered through recipes or the code.
 
-pi_host := "konazumi@100.64.0.3"
+pi_host := "konazumi@100.64.0.9"
 remote_dir := "solar-bridge"
 remote_bin := remote_dir + "/solar_controller"
 ha_host := "hassio@192.168.1.187"
@@ -29,10 +29,6 @@ probe *args:
 
 dump:
     ssh {{ pi_host }} "{{ remote_bin }} dump"
-
-install-udev:
-    scp systemd/99-ttyrs485.rules {{ pi_host }}:/tmp/99-ttyrs485.rules
-    ssh -t {{ pi_host }} "sudo mv /tmp/99-ttyrs485.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger"
 
 install-unit:
     ssh {{ pi_host }} "mkdir -p ~/.config/systemd/user"

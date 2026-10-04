@@ -80,8 +80,8 @@
 - crane `src` filter widened (`filterCargoSources || maps/*.toml`) — `include_str!` survives `nix build`; both native and cross builds green.
 - `justfile`: `test` / `build` / `build-arm` / `deploy` (scp + atomic mv; systemd restart lands with Task 2.1) / `probe` (ssh passthrough). Pi coordinates centralized in the justfile header.
 
-### Task 0.3: Stable serial device name on the Pi — READY (handed over 2026-09-28, one-time ssh)
-udev symlink `/dev/ttyRS485` for the CH340 dongle (vid 1a86 pid 7523 — verify first: `just udev-info`). `systemd/99-ttyrs485.rules` in repo; `just install-udev` ships it.
+### Task 0.3: Stable serial device name on the Pi — SUPERSEDED 2026-10-04 (hardware change, rule retired)
+Was: udev symlink `/dev/ttyRS485` for the CH340 USB dongle. Now: inverter connected via an SC16IS752 SPI-to-UART bridge (dmesg: `spi1.0 ... is a SC16IS752`) → `/dev/ttySC0` (channel 0; `ttySC1` = channel 1, unused). Numbering is fixed by the dtoverlay — deterministic across boots, no udev rule needed; there is no idVendor/idProduct on SPI. Rule file and `just install-udev` deleted from the repo. Pi was reinstalled 2026-10-04; the new install never had the rule.
 
 ### Task 0.4: systemd user unit — READY (handed over 2026-09-28, split from Task 2.1)
 `systemd/solar-bridge.service` (user service, `Restart=always`); `just install-unit` ships + enables. Needs `loginctl enable-linger konazumi` once (user service without a session). journald timestamps stderr — no in-code log timestamps needed.
@@ -189,7 +189,6 @@ tests/map_parse.rs             # 13 strict-loading tests — green
 tests/spans.rs                 # 8 span-layout tests — green
 tests/decode_all.rs            # 2 — synthetic-image coupling + loud failure — green
 tests/backoff.rs, tests/config.rs, tests/directives.rs, tests/server.rs # DONE — green (4/5/10/3)
-systemd/99-ttyrs485.rules      # Task 0.3 — in repo; Pi install pending (just install-udev)
 systemd/solar-bridge.service   # Task 0.4 — in repo; Pi install pending (just install-unit + linger)
 # on the HA box: /config/custom_components/solar_bridge/
 ```
