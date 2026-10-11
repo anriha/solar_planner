@@ -16,12 +16,21 @@ from .hub import SolarBridgeState
 
 
 def bridge_device(serial: str) -> DeviceInfo:
-    """One HA device for the whole bridge: sensors + directives."""
+    """The inverter device: readback sensors + control write widgets."""
     return DeviceInfo(
         identifiers={(DOMAIN, serial)},
         manufacturer=MANUFACTURER,
         model=MODEL,
         name=f"Deye {MODEL}",
+    )
+
+
+def planner_device(serial: str) -> DeviceInfo:
+    """Planner directives: bridge-side override state, independent of the inverter."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{serial}-planner")},
+        name="Solar Bridge planner",
+        via_device=(DOMAIN, serial),
     )
 
 
@@ -46,7 +55,7 @@ class DirectiveEntity(CoordinatorEntity[DataUpdateCoordinator[SolarBridgeState]]
         self._spec = spec
         self._attr_unique_id = f"{data.serial}_directive_{spec['name']}"
         self._attr_name = spec["name"].replace("_", " ")
-        self._attr_device_info = bridge_device(data.serial)
+        self._attr_device_info = planner_device(data.serial)
 
 
 class ControlEntity(CoordinatorEntity[DataUpdateCoordinator[SolarBridgeState]]):
