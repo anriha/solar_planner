@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -10,6 +11,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_HOST, CONF_PORT, CONF_TOKEN, DEFAULT_PORT, DOMAIN
 from .hub import BridgeAuthError, BridgeConnectionError, BridgeHub
+
+_LOGGER = logging.getLogger(__name__)
 
 STEP_USER_SCHEMA = vol.Schema(
     {
@@ -49,7 +52,7 @@ class SolarBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
             except (BridgeConnectionError, TimeoutError, HomeAssistantError):
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001
-                _LOGGER_WARNING_PLACEHOLDER
+                _LOGGER.exception("Unexpected error during bridge connection test")
                 errors["base"] = "unknown"
             else:
                 await self.async_set_unique_id(serial)
