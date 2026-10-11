@@ -14,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use kameo::actor::ActorRef;
 
 use crate::{
+    bus::{BusActor, WriteRegister},
     directives::{ApplyDirective, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
     state::{GetState, StateActor, Subscribe, Unsubscribe},
@@ -26,6 +27,7 @@ pub struct AppState {
     pub meta: Arc<serde_json::Value>,
     pub state: ActorRef<StateActor>,
     pub directives: ActorRef<DirectivesActor>,
+    pub bus: ActorRef<BusActor>,
     pub token: String,
 }
 
@@ -129,6 +131,23 @@ async fn connection(app: AppState, mut socket: WebSocket) {
                     },
                     Err(_) => ServerMsg::Error {
                         message: "directives actor unavailable".into(),
+                    },
+                }
+            }
+            Ok(ClientMsg::Write { id, name, value }) => {
+                match app.bus.ask(WriteRegister { name, value }).await {
+                    Ok(()) => ServerMsg::WriteAck {
+                        id,
+                        ok: true,
+                        error: None,
+                    },
+                    Err(kameo::error::SendError::HandlerError(e)) => ServerMsg::WriteAck {
+                        id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                    Err(_) => ServerMsg::Error {
+                        message: "bus actor unavailable".into(),
                     },
                 }
             }

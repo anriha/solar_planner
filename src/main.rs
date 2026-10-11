@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use kameo::actor::{ActorRef, Spawn};
 use solar_controller::{
-    bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick}, config, directives::DirectivesActor, map::{EMBEDDED_MAP, RegisterMap, load_from_str}, probe, server::{self, AppState}, state::{GetState, StateActor},
+    bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick}, config, directives::{DirectivesActor, directive_schema}, map::{EMBEDDED_MAP, RegisterMap, load_from_str}, probe, server::{self, AppState}, state::{GetState, StateActor},
 };
 
 #[derive(Parser)]
@@ -81,7 +81,9 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
         );
     }
     let map = load_from_str(EMBEDDED_MAP)?;
-    let meta = Arc::new(serde_json::to_value(&map)?);
+    let mut meta = serde_json::to_value(&map)?;
+    meta["directives"] = directive_schema();
+    let meta = Arc::new(meta);
 
     let state_ref = StateActor::spawn(StateActor::default());
     let directives_ref = DirectivesActor::spawn(DirectivesActor::new(
@@ -105,6 +107,7 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
         meta,
         state: state_ref,
         directives: directives_ref,
+        bus: bus_ref.clone(),
         token: cfg.token,
     };
     tokio::spawn(server::serve(listener, app));

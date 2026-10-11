@@ -8,6 +8,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use kameo::actor::Spawn;
 use serde_json::{Value as Json, json};
+use solar_controller::bus::{BusActor, LinkConfig};
 use solar_controller::directives::DirectivesActor;
 use solar_controller::map::{EMBEDDED_MAP, load_from_str};
 use solar_controller::server::{AppState, serve};
@@ -24,10 +25,22 @@ async fn setup() -> (u16, tempfile::TempDir) {
     let directives = DirectivesActor::spawn(
         DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
     );
+    let meta = Arc::new(serde_json::to_value(&map).unwrap());
+    let bus = BusActor::spawn(BusActor::new(
+        LinkConfig {
+            port: "/dev/null".into(),
+            baud: 9600,
+            slave: 1,
+        },
+        map,
+        Duration::from_secs(5),
+        state.clone(),
+    ));
     let app = AppState {
-        meta: Arc::new(serde_json::to_value(&map).unwrap()),
+        meta,
         state,
         directives,
+        bus,
         token: "test-token".into(),
     };
 
@@ -133,4 +146,47 @@ async fn invalid_cmd_acks_with_error_and_malformed_input_gets_error() {
 
     ws.send(Message::text("garbage".to_string())).await.unwrap();
     assert_eq!(recv_json(&mut ws).await["type"], "error");
+}
+
+#[tokio::test]
+async fn write_unknown_control_rejects_without_io() {
+    let (port, _dir) = setup().await;
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut ws).await; // hello
+
+    ws.send(Message::text(
+        json!({"type": "write", "id": "w1", "name": "no_such_control", "value": 1}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let m = recv_json(&mut ws).await;
+    assert_eq!(m["type"], "write_ack");
+    assert_eq!(m["id"], "w1");
+    assert_eq!(m["ok"], false);
+    assert!(m["error"].as_str().unwrap().contains("unknown control"));
+}
+
+#[tokio::test]
+async fn write_valid_control_surfaces_bus_connect_failure() {
+    // The test env has no serial link: a well-formed write must still route
+    // through BusActor and come back as ok=false with the connect failure.
+    let (port, _dir) = setup().await;
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut ws).await; // hello
+
+    ws.send(Message::text(
+        json!({"type": "write", "id": "w2", "name": "batt_max_charge_current", "value": 100})
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let m = recv_json(&mut ws).await;
+    assert_eq!(m["type"], "write_ack");
+    assert_eq!(m["id"], "w2");
+    assert_eq!(m["ok"], false);
+    assert!(m["error"].as_str().unwrap().contains("connect"));
 }

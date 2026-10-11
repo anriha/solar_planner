@@ -154,21 +154,21 @@ sensors = [
 
 controls = [
   # -------------------------------------------------- on/off and modes
-  { name = "inverter_onoff", address = 80, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
-  { name = "solar_sell", address = 145, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
-  { name = "grid_charge_enable", address = 130, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
-  { name = "gen_charge_enable", address = 129, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },
-  { name = "work_mode", address = 142, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "selling_first" }, { value = 1, label = "zero_export_load" }, { value = 2, label = "zero_export_ct" } ] } },
-  { name = "priority_load", address = 141, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0 } },                                        # readback 1 2026-09-28; semantics per sunsynk
+  { name = "inverter_onoff", address = 80, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "solar_sell", address = 145, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "grid_charge_enable", address = 130, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "gen_charge_enable", address = 129, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
+  { name = "work_mode", address = 142, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "selling_first" }, { value = 1, label = "zero_export_load" }, { value = 2, label = "zero_export_ct" } ] } },
+  { name = "priority_load", address = 141, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },                                        # readback 1 2026-09-28; semantics per sunsynk
 
   # ------------------------------------------------------- power limits
   # CONFLICT: 340 is "Max Sell Power" per Developer089 but "Max Solar Power"
   # per sunsynk. Resolve by reading it back and comparing to the LCD.
-  { name = "max_sell_power", address = 340, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "max_grid_output_power", address = 143, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "grid_peak_shaving_power", address = 191, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },  # readback 8000 W 2026-09-28; widen if the LCD range is larger
+  { name = "max_sell_power", address = 340, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "max_grid_output_power", address = 143, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "grid_peak_shaving_power", address = 191, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },  # readback 8000 W 2026-09-28; widen if the LCD range is larger
   # zero-export safety draw; may go slightly negative per sunsynk; readback 20 W.
-  { name = "zero_export_power", address = 104, encoding = { type = "s16" }, unit = "W", constraint = { type = "number", min = -500, max = 500 } },
+  { name = "zero_export_power", address = 104, encoding = { type = "s16" }, unit = "W", writable = true, constraint = { type = "number", min = -500, max = 500 } },
   # DISABLED: live readback = 0xFFFF (unset sentinel -> 6553.5 with scale).
   # Needs sentinel handling (0xFFFF = "off") before exposure. Developer089
   # only, unverified against LCD.
@@ -177,82 +177,82 @@ controls = [
   # ------------------------------------- battery setup
   # Live readback 2026-09-27: 108=109=200 A (device default) - max raised to
   # 240 (sunsynk's limit for LV hybrids) so readback never violates constraint.
-  { name = "batt_max_charge_current", address = 108, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 240 } },
-  { name = "batt_max_discharge_current", address = 109, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 240 } },
-  { name = "grid_charge_current", address = 128, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 185 } },
-  { name = "batt_capacity_ah", address = 102, encoding = { type = "u16" }, unit = "Ah", constraint = { type = "number", min = 0, max = 2000 } },
-  { name = "batt_shutdown_soc", address = 115, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "batt_restart_soc", address = 116, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "batt_max_charge_current", address = 108, encoding = { type = "u16" }, unit = "A", writable = true, constraint = { type = "number", min = 0, max = 240 } },
+  { name = "batt_max_discharge_current", address = 109, encoding = { type = "u16" }, unit = "A", writable = true, constraint = { type = "number", min = 0, max = 240 } },
+  { name = "grid_charge_current", address = 128, encoding = { type = "u16" }, unit = "A", writable = true, constraint = { type = "number", min = 0, max = 185 } },
+  { name = "batt_capacity_ah", address = 102, encoding = { type = "u16" }, unit = "Ah", writable = true, constraint = { type = "number", min = 0, max = 2000 } },
+  { name = "batt_shutdown_soc", address = 115, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "batt_restart_soc", address = 116, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
   # planner must enforce shutdown(115) <= low(117) <= restart(116)
-  { name = "batt_low_soc", address = 117, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "batt_low_soc", address = 117, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
   # Charge-start thresholds (sunsynk semantics; readbacks 2026-09-28):
   # gen = 49.00 V / 30 % / 40 A, grid = 49.00 V / 30 %.
-  { name = "gen_charge_start_voltage", address = 123, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "gen_charge_start_soc", address = 124, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "gen_charge_current", address = 125, encoding = { type = "u16" }, unit = "A", constraint = { type = "number", min = 0, max = 185 } },
-  { name = "grid_charge_start_voltage", address = 126, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "grid_charge_start_soc", address = 127, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
+  { name = "gen_charge_start_voltage", address = 123, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "gen_charge_start_soc", address = 124, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "gen_charge_current", address = 125, encoding = { type = "u16" }, unit = "A", writable = true, constraint = { type = "number", min = 0, max = 185 } },
+  { name = "grid_charge_start_voltage", address = 126, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "grid_charge_start_soc", address = 127, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
   # Battery voltage thresholds (x0.01 V; voltage-side siblings of the SOC
   # trio; planner must enforce shutdown <= low <= restart as with SOC).
   # Readbacks 2026-09-28: eq/absorption/float 57.60/57.60/55.20;
   # shutdown/restart/low 46.00/52.00/47.50 - all within 41..60.
-  { name = "batt_equalization_voltage", address = 99, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "batt_absorption_voltage", address = 100, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "batt_float_voltage", address = 101, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "batt_shutdown_voltage", address = 118, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "batt_restart_voltage", address = 119, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "batt_low_voltage", address = 120, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_equalization_voltage", address = 99, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_absorption_voltage", address = 100, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_float_voltage", address = 101, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_shutdown_voltage", address = 118, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_restart_voltage", address = 119, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "batt_low_voltage", address = 120, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
 
   # ------------------------------------------------ grid protection window
   # TODO verify semantics: live readback 185 = 276.0 V, 186 = 103.5 V - the
   # 186 value is far below any plausible 3-phase low-voltage limit (may be
   # per-cell or a different parameter). Constraints widened to cover actual
   # device values; re-tighten after checking the LCD grid-protection screen.
-  { name = "grid_voltage_high_limit", address = 185, encoding = { type = "u16" }, scale = 0.1, unit = "V", constraint = { type = "number", min = 0, max = 300 } },
-  { name = "grid_voltage_low_limit", address = 186, encoding = { type = "u16" }, scale = 0.1, unit = "V", constraint = { type = "number", min = 0, max = 300 } },
+  { name = "grid_voltage_high_limit", address = 185, encoding = { type = "u16" }, scale = 0.1, unit = "V", writable = true, constraint = { type = "number", min = 0, max = 300 } },
+  { name = "grid_voltage_low_limit", address = 186, encoding = { type = "u16" }, scale = 0.1, unit = "V", writable = true, constraint = { type = "number", min = 0, max = 300 } },
 
   # ------------------------------------ backup / UPS + gen port settings
   # 209 UPS (backup) delay time; readback 0 s 2026-09-28 (unit/range per
   # sunsynk, unconfirmed vs LCD).
-  { name = "ups_delay_time", address = 209, encoding = { type = "u16" }, unit = "s", constraint = { type = "number", min = 0, max = 3600 } },
+  { name = "ups_delay_time", address = 209, encoding = { type = "u16" }, unit = "s", writable = true, constraint = { type = "number", min = 0, max = 3600 } },
   # 133 Gen Port Use (manual 5.9); readback 0 = generator.
-  { name = "gen_port_usage", address = 133, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "generator" }, { value = 1, label = "smart_load" }, { value = 2, label = "micro_inverter" } ] } },
-  { name = "gen_off_soc", address = 135, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },                        # readback 95 2026-09-28 (sunsynk)
-  { name = "gen_on_soc", address = 137, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },                         # readback 100 2026-09-28 (sunsynk)
+  { name = "gen_port_usage", address = 133, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "generator" }, { value = 1, label = "smart_load" }, { value = 2, label = "micro_inverter" } ] } },
+  { name = "gen_off_soc", address = 135, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },                        # readback 95 2026-09-28 (sunsynk)
+  { name = "gen_on_soc", address = 137, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },                         # readback 100 2026-09-28 (sunsynk)
 
   # -------------------------------------- time-of-use slots (6 programs)
   # Times are plain HHMM integers (e.g. 630 = 06:30); planner formats/encodes.
   # 172-177 CAVEAT: sunsynk decodes these as packed bitfields (charge bits
   # 0-1, mode bits 2-4, sell bit 5), Developer089 as plain 0-3 selects.
   # Verify via read-back vs LCD before any write.
-  { name = "tou_time_1", address = 148, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_2", address = 149, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_3", address = 150, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_4", address = 151, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_5", address = 152, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_6", address = 153, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_power_1", address = 154, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_power_2", address = 155, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_power_3", address = 156, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_power_4", address = 157, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_power_5", address = 158, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_power_6", address = 159, encoding = { type = "u16" }, unit = "W", constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "tou_voltage_1", address = 160, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_voltage_2", address = 161, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_voltage_3", address = 162, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_voltage_4", address = 163, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_voltage_5", address = 164, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_voltage_6", address = 165, encoding = { type = "u16" }, scale = 0.01, unit = "V", constraint = { type = "number", min = 41, max = 60 } },
-  { name = "tou_soc_1", address = 166, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_soc_2", address = 167, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_soc_3", address = 168, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_soc_4", address = 169, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_soc_5", address = 170, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_soc_6", address = 171, encoding = { type = "u16" }, unit = "%", constraint = { type = "number", min = 0, max = 100 } },
-  { name = "tou_charge_source_1", address = 172, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
-  { name = "tou_charge_source_2", address = 173, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
-  { name = "tou_charge_source_3", address = 174, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
-  { name = "tou_charge_source_4", address = 175, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
-  { name = "tou_charge_source_5", address = 176, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
-  { name = "tou_charge_source_6", address = 177, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_time_1", address = 148, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_2", address = 149, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_3", address = 150, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_4", address = 151, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_5", address = 152, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_6", address = 153, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_power_1", address = 154, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_2", address = 155, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_3", address = 156, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_4", address = 157, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_5", address = 158, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_power_6", address = 159, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  { name = "tou_voltage_1", address = 160, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_2", address = 161, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_3", address = 162, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_4", address = 163, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_5", address = 164, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_voltage_6", address = 165, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
+  { name = "tou_soc_1", address = 166, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_2", address = 167, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_3", address = 168, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_4", address = 169, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_5", address = 170, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_soc_6", address = 171, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },
+  { name = "tou_charge_source_1", address = 172, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_2", address = 173, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_3", address = 174, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_4", address = 175, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_5", address = 176, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
+  { name = "tou_charge_source_6", address = 177, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "off" }, { value = 1, label = "grid" }, { value = 2, label = "generator" }, { value = 3, label = "grid_and_generator" } ] } },
 ]

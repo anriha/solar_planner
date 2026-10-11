@@ -10,7 +10,7 @@ fn load_str(content: &str) -> anyhow::Result<Config> {
 #[test]
 fn example_config_parses_and_directives_path_defaults() {
     let cfg = config::load("config.example.toml").unwrap();
-    assert_eq!(cfg.port, "/dev/ttyRS485");
+    assert_eq!(cfg.port, "/dev/ttySC0");
     assert_eq!(cfg.baud, 9600);
     assert_eq!(cfg.slave, 1);
     assert_eq!(cfg.interval_secs, 5);

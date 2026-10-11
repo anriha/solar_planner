@@ -129,3 +129,20 @@ fn duplicate_option_values_are_rejected() {
     );
     assert!(err.is_err());
 }
+
+#[test]
+fn cross_kind_duplicate_name_rejected() {
+    // sensors and controls share the values namespace; a duplicate across
+    // kinds must reject, not silently overwrite at decode time.
+    let err = parse(
+        r#"sensors = [
+        { name = "dup", address = 1, encoding = { type = "u16" } },
+]
+controls = [
+        { name = "dup", address = 2, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
+]"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate"), "unexpected error: {err}");
+}

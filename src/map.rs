@@ -301,6 +301,8 @@ pub struct ControlDef {
     pub offset: f64,
     #[serde(default)]
     pub unit: Option<String>,
+    #[serde(default)]
+    pub writable: bool,
     #[serde(deserialize_with = "parse_constraint")]
     pub constraint: Constraint,
 }
@@ -358,11 +360,16 @@ impl RegisterMap {
                 )));
             }
         }
-        let mut cseen = std::collections::BTreeSet::new();
         for c in &self.controls {
-            if !cseen.insert(c.name.clone()) {
+            if !seen.insert(c.name.clone()) {
                 return Err(MapError::Invalid(format!(
-                    "duplicate control name: {}",
+                    "duplicate name (sensors/controls share the values namespace): {}",
+                    c.name
+                )));
+            }
+            if c.scale == 0.0 {
+                return Err(MapError::Invalid(format!(
+                    "control {}: scale must be nonzero",
                     c.name
                 )));
             }

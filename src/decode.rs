@@ -1,4 +1,4 @@
-use crate::map::{BaseWord, Encoding, SensorDef};
+use crate::map::{BaseWord, ControlDef, Constraint, Encoding, EnumOptions, SensorDef};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(untagged)]
@@ -17,14 +17,55 @@ pub enum DecodeError {
     InvalidAscii,
 }
 
-pub fn decode(def: &SensorDef, words: &[u16]) -> Result<Value, DecodeError> {
-    if words.len() != def.encoding.word_count() {
+/// Shared decode input: the fields SensorDef and ControlDef have in common
+/// (decision 4a, 2026-10-11). Options come from `SensorDef.options` or a
+/// control's Select constraint, so enum readbacks decode to labels either way.
+pub struct Field<'a> {
+    pub name: &'a str,
+    pub address: u16,
+    pub encoding: Encoding,
+    pub scale: f64,
+    pub offset: f64,
+    pub options: Option<&'a [EnumOptions]>,
+}
+
+impl<'a> From<&'a SensorDef> for Field<'a> {
+    fn from(s: &'a SensorDef) -> Self {
+        Self {
+            name: &s.name,
+            address: s.address,
+            encoding: s.encoding,
+            scale: s.scale,
+            offset: s.offset,
+            options: s.options.as_deref(),
+        }
+    }
+}
+
+impl<'a> From<&'a ControlDef> for Field<'a> {
+    fn from(c: &'a ControlDef) -> Self {
+        Self {
+            name: &c.name,
+            address: c.address,
+            encoding: c.encoding,
+            scale: c.scale,
+            offset: c.offset,
+            options: match &c.constraint {
+                Constraint::Select { options } => Some(options),
+                _ => None,
+            },
+        }
+    }
+}
+
+pub fn decode_field(field: &Field, words: &[u16]) -> Result<Value, DecodeError> {
+    if words.len() != field.encoding.word_count() {
         return Err(DecodeError::WordCount {
-            expected: def.encoding.word_count(),
+            expected: field.encoding.word_count(),
             got: words.len(),
         });
     }
-    if let Some(options) = &def.options {
+    if let Some(options) = field.options {
         let raw = words[0];
         return options
             .iter()
@@ -33,7 +74,7 @@ pub fn decode(def: &SensorDef, words: &[u16]) -> Result<Value, DecodeError> {
             .ok_or(DecodeError::UnknownOption(raw));
     }
 
-    let raw: f64 = match def.encoding {
+    let raw: f64 = match field.encoding {
         Encoding::U16 => words[0] as f64,
         Encoding::S16 => words[0] as i16 as f64,
         Encoding::U32 { base_word } => assemble(words, base_word) as f64,
@@ -51,7 +92,12 @@ pub fn decode(def: &SensorDef, words: &[u16]) -> Result<Value, DecodeError> {
             return Ok(Value::Text(trimmed.to_string()));
         }
     };
-    Ok(Value::Number((raw - def.offset) * def.scale))
+    Ok(Value::Number((raw - field.offset) * field.scale))
+}
+
+/// Decode a sensor def (frozen contract wrapper — tests/decode.rs vectors).
+pub fn decode(def: &SensorDef, words: &[u16]) -> Result<Value, DecodeError> {
+    decode_field(&Field::from(def), words)
 }
 
 fn assemble(words: &[u16], base: BaseWord) -> u32 {
@@ -61,3 +107,5 @@ fn assemble(words: &[u16], base: BaseWord) -> u32 {
     };
     (high as u32) << 16 | low as u32
 }
+
+// Write encoding lives bus-side (decision 2b, 2026-10-11): see bus::encode_write.

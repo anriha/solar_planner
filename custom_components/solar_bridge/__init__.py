@@ -15,7 +15,7 @@ from .hub import BridgeAuthError, BridgeConnectionError, BridgeHub, SolarBridgeS
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.SELECT, Platform.NUMBER]
 
 
 @dataclass

@@ -1,6 +1,6 @@
 use serde_json::json;
 use solar_controller::directives::{
-    ApplyError, Directives, ForceMode, Percent, Price, load, save,
+    ApplyError, Directives, ForceMode, Percent, Price, directive_schema, load, save,
 };
 
 #[test]
@@ -123,4 +123,17 @@ fn corrupt_file_is_a_loud_error() {
     let path = dir.path().join("directives.json");
     std::fs::write(&path, "not json").unwrap();
     assert!(load(&path).is_err());
+}
+
+#[test]
+fn directive_schema_matches_frozen_contract() {
+    // serde emits internally-tagged variants with alphabetically sorted keys
+    // (content buffering), so compare parsed JSON, not bytes.
+    let actual: serde_json::Value = serde_json::from_str(&serde_json::to_string(&directive_schema()).unwrap())
+        .unwrap();
+    let expected: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"bool","name":"planner_enabled"},{"type":"enum","name":"force_mode","options":["auto","charge","discharge","hold"]},{"type":"number","name":"soc_target_hold","min":0.0,"max":100.0,"nullable":true,"unit":"%"},{"type":"number","name":"price_override","min":-10000.0,"max":10000.0,"nullable":true,"unit":"CZK/kWh"}]"#,
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
 }

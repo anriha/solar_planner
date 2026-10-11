@@ -229,3 +229,70 @@ impl Message<GetCurrent> for DirectivesActor {
         self.current.clone()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Directive schema — meta wire contract (added 2026-10-11, decisions 1b/2b).
+//
+// meta gains a top-level "directives" array; the HA integration generates
+// switch/select/number entities from it. Types describe DATA, not HA widgets
+// (bool -> SwitchEntity, enum -> SelectEntity, number -> NumberEntity).
+//
+// Exact JSON the bridge must emit (frozen contract; HA side ships against it):
+//   {"name":"planner_enabled","type":"bool"}
+//   {"name":"force_mode","type":"enum","options":["auto","charge","discharge","hold"]}
+//   {"name":"soc_target_hold","type":"number","min":0.0,"max":100.0,"nullable":true,"unit":"%"}
+//   {"name":"price_override","type":"number","min":-10000.0,"max":10000.0,"nullable":true,"unit":"CZK/kWh"}
+//
+// min/max mirror the Percent/Price newtype bounds; nullable marks Option fields.
+// Ranges here are UX clamps only — Directives::apply() stays the validation
+// authority.
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum DirectiveSpec {
+    Bool {
+        name: &'static str,
+    },
+    Enum {
+        name: &'static str,
+        options: &'static [&'static str],
+    },
+    Number {
+        name: &'static str,
+        min: f64,
+        max: f64,
+        nullable: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unit: Option<&'static str>,
+    },
+}
+
+/// The planner-directive surface as `meta.directives`, exactly per the frozen
+/// wire contract in the comment block above. Static by design: it mirrors the
+/// `Directives` struct + `apply()`, not the register map.
+pub fn directive_schema() -> serde_json::Value {
+    serde_json::to_value([
+        DirectiveSpec::Bool {
+            name: "planner_enabled",
+        },
+        DirectiveSpec::Enum {
+            name: "force_mode",
+            options: &["auto", "charge", "discharge", "hold"],
+        },
+        DirectiveSpec::Number {
+            name: "soc_target_hold",
+            min: 0.0,
+            max: 100.0,
+            nullable: true,
+            unit: Some("%"),
+        },
+        DirectiveSpec::Number {
+            name: "price_override",
+            min: -10_000.0,
+            max: 10_000.0,
+            nullable: true,
+            unit: Some("CZK/kWh"),
+        },
+    ])
+    .expect("static schema always serializes")
+}

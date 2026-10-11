@@ -5,7 +5,6 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -13,7 +12,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from . import SolarBridgeData
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .entity import bridge_device
 
 
 async def async_setup_entry(
@@ -25,6 +24,13 @@ async def async_setup_entry(
     async_add_entities(
         SolarBridgeSensor(data.coordinator, sensor, data.serial)
         for sensor in data.meta["sensors"]
+    )
+    # Control readbacks: polled by the bridge and decoded into values since
+    # the 2026-10-11 meta/state extension; read-only here (writes are the
+    # Control* entities in switch/select/number).
+    async_add_entities(
+        SolarBridgeSensor(data.coordinator, control, data.serial)
+        for control in data.meta.get("controls", [])
     )
 
 
@@ -47,14 +53,16 @@ class SolarBridgeSensor(CoordinatorEntity[DataUpdateCoordinator[Any]], SensorEnt
             self._attr_device_class = device_class
         if state_class := sensor_def.get("state_class"):
             self._attr_state_class = state_class
-        if options := sensor_def.get("options"):
+        options = sensor_def.get("options")
+        # Control defs carry enum options under constraint (Select), not top-level.
+        if (
+            options is None
+            and sensor_def.get("constraint", {}).get("type") == "select"
+        ):
+            options = sensor_def["constraint"]["options"]
+        if options:
             self._attr_options = [o["label"] for o in options]
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, serial)},
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            name=f"Deye {MODEL}",
-        )
+        self._attr_device_info = bridge_device(serial)
 
     @property
     def native_value(self) -> float | str | None:
