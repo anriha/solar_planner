@@ -158,6 +158,12 @@ pub enum Constraint {
     Switch {
         on: u16,
         off: u16,
+        /// Optional bit field: when set, this control owns only the masked
+        /// bits of the register. Decode masks them; writes read-modify-write
+        /// the remaining bits untouched (e.g. reg 146 = TOU enable bit 0
+        /// plus weekday bits 1-7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bitmask: Option<u16>,
     },
     Select {
         options: Vec<EnumOptions>,
@@ -197,6 +203,8 @@ struct RawConstraint {
     #[serde(default)]
     off: Option<u16>,
     #[serde(default)]
+    bitmask: Option<u16>,
+    #[serde(default)]
     options: Option<Vec<EnumOptions>>,
     #[serde(default)]
     min: Option<f64>,
@@ -225,7 +233,21 @@ fn constraint_from_raw(raw: RawConstraint) -> Result<Constraint, String> {
             if raw.step.is_some() {
                 return Err(unexpected("step", "switch"));
             }
-            Ok(Constraint::Switch { on, off })
+            if let Some(mask) = raw.bitmask {
+                if mask == 0 {
+                    return Err("switch constraint bitmask must be nonzero".to_string());
+                }
+                if on & !mask != 0 || off & !mask != 0 {
+                    return Err(format!(
+                        "switch constraint on/off ({on}/{off}) outside bitmask {mask:#06x}"
+                    ));
+                }
+            }
+            Ok(Constraint::Switch {
+                on,
+                off,
+                bitmask: raw.bitmask,
+            })
         }
         ConstraintKind::Select => {
             let Some(options) = raw.options else {
@@ -256,6 +278,9 @@ fn constraint_from_raw(raw: RawConstraint) -> Result<Constraint, String> {
             if raw.step.is_some() {
                 return Err(unexpected("step", "select"));
             }
+            if raw.bitmask.is_some() {
+                return Err(unexpected("bitmask", "select"));
+            }
             Ok(Constraint::Select { options })
         }
         ConstraintKind::Number => {
@@ -270,6 +295,9 @@ fn constraint_from_raw(raw: RawConstraint) -> Result<Constraint, String> {
             }
             if raw.options.is_some() {
                 return Err(unexpected("options", "number"));
+            }
+            if raw.bitmask.is_some() {
+                return Err(unexpected("bitmask", "number"));
             }
             Ok(Constraint::Number {
                 min,
@@ -381,10 +409,30 @@ impl RegisterMap {
                     c.name
                 )));
             }
-            if let Constraint::Switch { on, off } = &c.constraint
-                && on == off
-            {
-                return Err(MapError::Invalid(format!("control {}: on == off", c.name)));
+            if let Constraint::Switch { on, off, bitmask } = &c.constraint {
+                if on == off {
+                    return Err(MapError::Invalid(format!("control {}: on == off", c.name)));
+                }
+                if let Some(mask) = bitmask {
+                    if *mask == 0 {
+                        return Err(MapError::Invalid(format!(
+                            "control {}: bitmask must be nonzero",
+                            c.name
+                        )));
+                    }
+                    if on & !mask != 0 || off & !mask != 0 {
+                        return Err(MapError::Invalid(format!(
+                            "control {}: on/off ({on}/{off}) outside bitmask {mask:#06x}",
+                            c.name
+                        )));
+                    }
+                    if c.encoding != Encoding::U16 {
+                        return Err(MapError::Invalid(format!(
+                            "control {}: bitmask requires u16 encoding",
+                            c.name
+                        )));
+                    }
+                }
             }
         }
         Ok(())

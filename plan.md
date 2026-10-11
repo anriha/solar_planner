@@ -47,7 +47,7 @@
 7. **Division of work:** HA/Python side fully delegated to the agent (complete, in working copy); Rust changes scaffolded with DECIDE holes for the human: (a) DirectiveSpec representation + placement, (b) meta composition (typed envelope vs json merge), (c) controls decode (generalize decoder input vs second loop) + cross-kind name uniqueness in `validate()` (values is name-keyed; sensors∪controls dupes would silently overwrite) + `tests/decode_all.rs` coupling coverage for controls.
 8. **Plan amended (D1): register writes pulled forward to now, HA as writer.** Was: "planner is provably the first writer" (2026-09-27 #5/Phase 3). Now: HA-writable control registers as a *debug tool* (rare manual writes, testing aid); planner directives stay but are secondary until Phase 3. Consequence: the future planner must treat registers as source of truth (read-before-write, no shadow state).
 9. **Write protocol (D2): dedicated `write`/`write_ack` frames** — `{"type":"write","id","name","value"}` / `{"type":"write_ack","id","ok","error"?}`. Directives keep `cmd` untouched; DirectivesActor never sees register writes. BusActor's mailbox serializes writes with polls (single-master discipline preserved).
-10. **Writable surface (D3): `writable = true` on ALL 64 active controls for now** — schema field is deny-by-default (`#[serde(default)]`), but the map sets true everywhere; 172–177/340/186 semantics still unresolved, so writes there are at the user's own risk until LCD-verified. Tightening later = flipping map entries.
+10. **Writable surface (D3): `writable = true` on ALL 64 active controls for now** — schema field is deny-by-default (`#[serde(default)]`), but the map sets true everywhere; 172–177/186 semantics still unresolved, so writes there are at the user's own risk until LCD-verified. Tightening later = flipping map entries.
 11. **Validation (D4): out-of-range writes REJECTED, never clamped** — bridge is the authority; HA UI clamps are cosmetic.
 12. **Readback (D5): FC06 → FC03 → raw equality before ok=true**; mismatch = error ack.
 13. Open holes for the Rust fill: select-write value semantics (label vs u16 value), validation placement (server task vs BusActor), write-encoder placement + number representability policy — plus round-1 holes (directive_schema body, meta composition, controls decode, validate() cross-kind uniqueness, decode_all coverage).
@@ -173,7 +173,7 @@ Directive schema: `planner_enabled` (bool), `force_mode` (auto|charge|discharge|
 - `PlannerActor`: consumes `PlanningSignals` + directives + OTE hourly prices; decides charge/discharge windows.
 - **Sole Modbus writer.** Translates decisions into TOU writes (148–177), work mode (142), grid-charge (130). Safety limits are hard clamps in the write path (max charge power from `rated_power`/limits, SOC floor/ceiling, temperature gating, shutdown ≤ low ≤ restart ordering for 115–117), not suggestions. BusActor grows the write handler here — and only here.
 - Recompute on price update + directive change; write only on plan delta.
-- Before ANY first write: controlled window, one register at a time, readback-verified, LCD cross-checked. Resolve the 172–177 bitfield-vs-select question and the 340 naming conflict first (see Risks).
+- Before ANY first write: controlled window, one register at a time, readback-verified, LCD cross-checked. Resolve the 172–177 bitfield-vs-select question first (see Risks).
 
 ### The planning boundary (design fixed 2026-09-27, `src/telemetry.rs` — OPEN)
 ```rust
@@ -228,7 +228,7 @@ systemd/solar-bridge.service   # Task 0.4 — in repo; Pi install pending (just 
 - **Word order = base register holds the LOW word. VERIFIED TWICE:** rated power (20,21)=(0xD4C0,0x0001) → 0x0001D4C0=120000 → 12 000.0 W (independent ground truth: it's a 12K); PV total (534,535)=(0x022E,0x0000) → 558 → 55.8 kWh. ⚠️ **The original session note listed (534,535) as (0x0000,0x022E) — that pair was TRANSPOSED and briefly led us to implement base=high. Do not trust old captures; these two are the anchors.** Matches Developer089 `low_high` and sunsynk assembly.
 - Battery V 587 (0x1545→54.45 V), SOC 588 (100 %), current 591 (s16, +0.07 A), temp 586 (offset 1000 → 16.5 °C); PV1/2 at 676-679/672-673 (V×I=P ✓); inverter V 627-629 (227.7/230.0/230.0), freq 638 (50.00 Hz), inverter power 636 = load power 653 = 2001 W; temps 540/541 (25.0/38.5 °C).
 - Energy: PV today 529 (28.1 kWh), PV total 534/535 (55.8), batt 514-519, load 526/527.
-- Control read-backs: 108=109=200 A (device default → constraint max 240); 185=276.0 V, 186=103.5 V (semantics unclear, widened to 0–300); 77=0xFFFF (unset sentinel, entry disabled); 340 unread-yet (naming conflict open).
+- Control read-backs: 108=109=200 A (device default → constraint max 240); 185=276.0 V, 186=103.5 V (semantics unclear, widened to 0–300); 77=0xFFFF (unset sentinel, entry disabled); 340 = 13200 W, 143 = 12000 W (naming resolved 2026-10-11: 340 Max Solar, 143 Max Sell).
 - Firmware: 542–547 reads zeros — NOT version registers. Candidate: reg 22 = 0x0203 (plausible "V2.03") — compare against LCD before adding.
 - Grid/meter block 598–619 reads ~zero (open: CT/meter wiring or Meter Select setting).
 - Topology: Pi offsite at 100.64.0.3; HA on tailnet; bridge binds 0.0.0.0:8300 with bearer token; plain ws:// (tailnet encrypts).
@@ -236,7 +236,7 @@ systemd/solar-bridge.service   # Task 0.4 — in repo; Pi install pending (just 
 ## Risks & open questions
 
 1. **Sign conventions** (blocks Phase 3 trust, not Phase 1/2): grid 619 import-positive per Developer089 — unverified; battery 590/591 — sunsynk applies negative scale (native flip?) — unverified. Confirm under real flow; record in map comments when known.
-2. **reg 340 naming conflict** (Max Sell vs Max Solar): read back, compare to LCD (~12 kW ⇒ sell, ~15.6 kW ⇒ solar).
+2. ~~**reg 340 naming conflict** (Max Sell vs Max Solar)~~ - resolved 2026-10-11: LCD + upstreams confirm 340 = Max Solar Power (renamed max_solar_power); 143 = Max Sell Power (renamed from max_grid_output_power).
 3. **regs 172–177 encoding** (plain 0–3 select vs packed bitfields incl. mode bits 2–4, sell bit 5): read back vs LCD before any write; planner must encode correctly.
 4. **reg 186 = 103.5 V**: likely not a grid low-voltage limit at all. LCD grid-protection screen decides; possibly remove the entry.
 5. **Sentinel values** (0xFFFF = unset on 77): needs a schema concept (`sentinel:` field → Text("unset") or Option) before exposing such controls.

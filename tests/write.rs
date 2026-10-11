@@ -1,6 +1,6 @@
 use serde_json::json;
 use solar_controller::{
-    bus::{WriteError, encode_write},
+    bus::{WriteError, encode_write, encode_write_masked},
     decode::{Field, decode_field},
     map::{Constraint, ControlDef, Encoding, EMBEDDED_MAP, load_from_str},
 };
@@ -25,7 +25,7 @@ fn switch_maps_bool_to_on_off_raws() {
         Encoding::U16,
         1.0,
         0.0,
-        Constraint::Switch { on: 1, off: 0 },
+        Constraint::Switch { on: 1, off: 0, bitmask: None },
     );
     assert_eq!(encode_write(&d, &json!(true)).unwrap(), 1);
     assert_eq!(encode_write(&d, &json!(false)).unwrap(), 0);
@@ -33,6 +33,40 @@ fn switch_maps_bool_to_on_off_raws() {
         encode_write(&d, &json!("on")),
         Err(WriteError::Invalid { ref reason, .. }) if reason.contains("true/false")
     ));
+}
+
+#[test]
+fn bitmask_switch_preserves_neighbouring_flags() {
+    // reg 146: bit0 = TOU master, bits1-7 weekdays (live 0x00FE), bit8 =
+    // work-mode-3. Only bit0 may move.
+    let map = load_from_str(EMBEDDED_MAP).unwrap();
+    let tou = map
+        .controls
+        .iter()
+        .find(|c| c.name == "tou_enabled")
+        .unwrap();
+    assert_eq!(
+        encode_write_masked(tou, &json!(true), 0x00FE).unwrap(),
+        0x00FF
+    );
+    assert_eq!(
+        encode_write_masked(tou, &json!(false), 0x00FF).unwrap(),
+        0x00FE
+    );
+    assert_eq!(
+        encode_write_masked(tou, &json!(true), 0x01FE).unwrap(),
+        0x01FF
+    );
+    // Without the current word a bitfield write refuses instead of clobbering.
+    assert!(matches!(
+        encode_write(tou, &json!(true)),
+        Err(WriteError::Invalid { ref reason, .. }) if reason.contains("current register value")
+    ));
+    // Live 0x00FE readback masks down to "off".
+    assert_eq!(
+        decode_field(&Field::from(tou), &[0x00FE]).unwrap(),
+        solar_controller::decode::Value::Number(0.0)
+    );
 }
 
 #[test]
@@ -189,10 +223,26 @@ fn real_map_numbers_and_options_roundtrip() {
                     );
                 }
             }
-            Constraint::Switch { on, off } => {
-                assert_eq!(encode_write(c, &json!(true)).unwrap(), *on);
-                assert_eq!(encode_write(c, &json!(false)).unwrap(), *off);
-            }
+            Constraint::Switch { on, off, bitmask } => match bitmask {
+                None => {
+                    assert_eq!(encode_write(c, &json!(true)).unwrap(), *on);
+                    assert_eq!(encode_write(c, &json!(false)).unwrap(), *off);
+                }
+                Some(mask) => {
+                    // Neighbouring flags must survive; only the mask moves.
+                    let current = !*mask;
+                    let on_raw = encode_write_masked(c, &json!(true), current).unwrap();
+                    let off_raw = encode_write_masked(c, &json!(false), current).unwrap();
+                    assert_eq!(on_raw & !*mask, current & !*mask);
+                    assert_eq!(off_raw & !*mask, current & !*mask);
+                    assert_eq!(on_raw & *mask, *on);
+                    assert_eq!(off_raw & *mask, *off);
+                    assert_eq!(
+                        decode_field(&Field::from(c), &[on_raw]).unwrap(),
+                        solar_controller::decode::Value::Number(1.0)
+                    );
+                }
+            },
         }
     }
 }

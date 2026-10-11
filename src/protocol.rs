@@ -80,7 +80,7 @@ pub enum ClientMsg {
     },
     // --- Control writes (2026-10-11 D1–D5) ----------------------------------
     // HA -> bridge register writes. Wire contract:
-    //   client->server {"type":"write","id":"w1","name":"max_grid_output_power","value":200}
+    //   client->server {"type":"write","id":"w1","name":"max_sell_power","value":200}
     //   client->server {"type":"write","id":"w2","name":"grid_charge_enable","value":true}
     //   server->client {"type":"write_ack","id":"w1","ok":true}
     //   server->client {"type":"write_ack","id":"w1","ok":false,"error":"..."}

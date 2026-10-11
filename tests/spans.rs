@@ -124,7 +124,7 @@ fn embedded_map_matches_plan_layout() {
         (99, 64),  // battery/settings + TOU head (99..=162)
         (163, 29), // TOU tail + grid protection + peak shaving (163..=191)
         (209, 12), // UPS delay + BMS mirror (209..=220)
-        (340, 1),  // max sell power (naming conflict, read-back only)
+        (340, 1),  // max solar power (was max_sell_power; renamed 2026-10-11)
         (500, 1),  // run state
         (514, 28), // energy block (514..=541, bridged over 532-533/537-539)
         (555, 4),  // fault codes

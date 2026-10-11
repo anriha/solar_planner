@@ -27,6 +27,9 @@ pub struct Field<'a> {
     pub scale: f64,
     pub offset: f64,
     pub options: Option<&'a [EnumOptions]>,
+    /// Bit field owned by this control (switch constraints only); the rest of
+    /// the register belongs to other flags and is not decoded here.
+    pub mask: Option<u16>,
 }
 
 impl<'a> From<&'a SensorDef> for Field<'a> {
@@ -38,6 +41,7 @@ impl<'a> From<&'a SensorDef> for Field<'a> {
             scale: s.scale,
             offset: s.offset,
             options: s.options.as_deref(),
+            mask: None,
         }
     }
 }
@@ -54,6 +58,10 @@ impl<'a> From<&'a ControlDef> for Field<'a> {
                 Constraint::Select { options } => Some(options),
                 _ => None,
             },
+            mask: match &c.constraint {
+                Constraint::Switch { bitmask, .. } => *bitmask,
+                _ => None,
+            },
         }
     }
 }
@@ -65,8 +73,9 @@ pub fn decode_field(field: &Field, words: &[u16]) -> Result<Value, DecodeError> 
             got: words.len(),
         });
     }
+    let word = words[0] & field.mask.unwrap_or(u16::MAX);
     if let Some(options) = field.options {
-        let raw = words[0];
+        let raw = word;
         return options
             .iter()
             .find(|o| o.value == raw)
@@ -75,8 +84,8 @@ pub fn decode_field(field: &Field, words: &[u16]) -> Result<Value, DecodeError> 
     }
 
     let raw: f64 = match field.encoding {
-        Encoding::U16 => words[0] as f64,
-        Encoding::S16 => words[0] as i16 as f64,
+        Encoding::U16 => word as f64,
+        Encoding::S16 => word as i16 as f64,
         Encoding::U32 { base_word } => assemble(words, base_word) as f64,
         Encoding::S32 { base_word } => assemble(words, base_word) as i32 as f64,
         Encoding::Str { .. } => {

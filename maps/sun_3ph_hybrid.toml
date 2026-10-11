@@ -51,7 +51,7 @@ sensors = [
   { name = "battery_voltage", address = 587, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },    # VERIFIED 54.45
   { name = "battery_current", address = 591, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },    # VERIFIED +0.07; sign conv TODO
   { name = "battery_power", address = 590, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                      # sign conv TODO
-  { name = "battery_capacity_ah", address = 592, encoding = { type = "u16" }, unit = "Ah" },
+  { name = "battery_capacity_ah", address = 592, encoding = { type = "u16" }, unit = "Ah" },  # official "Corrected_AH" (BMS-corrected; control 102 is the configured one)
   { name = "battery_charge_efficiency", address = 114, encoding = { type = "u16" }, scale = 0.1, unit = "%" },                                                  # sunsynk; unverified
 
   # ------------------------------------------ battery 2 (unpopulated on single-battery systems)
@@ -69,7 +69,7 @@ sensors = [
   { name = "bms_discharge_current_limit", address = 213, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
   { name = "bms_soc", address = 214, encoding = { type = "u16" }, unit = "%", device_class = "battery", state_class = "measurement" },
   { name = "bms_voltage", address = 215, encoding = { type = "u16" }, scale = 0.01, unit = "V", device_class = "voltage", state_class = "measurement" },
-  { name = "bms_current", address = 216, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },
+  { name = "bms_current", address = 216, encoding = { type = "s16" }, scale = 0.01, unit = "A", device_class = "current", state_class = "measurement" },  # 0.01 kept - 2026-10-11: historical span ~-0.5..2.0 A (no integer scale)
   { name = "bms_temperature", address = 217, encoding = { type = "u16" }, scale = 0.1, offset = 1000, unit = "°C", device_class = "temperature", state_class = "measurement" },
   { name = "bms_max_charge_current", address = 218, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
   { name = "bms_max_discharge_current", address = 219, encoding = { type = "u16" }, unit = "A", device_class = "current", state_class = "measurement" },
@@ -159,13 +159,17 @@ controls = [
   { name = "grid_charge_enable", address = 130, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
   { name = "gen_charge_enable", address = 129, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },
   { name = "work_mode", address = 142, encoding = { type = "u16" }, writable = true, constraint = { type = "select", options = [ { value = 0, label = "selling_first" }, { value = 1, label = "zero_export_load" }, { value = 2, label = "zero_export_ct" } ] } },
-  { name = "priority_load", address = 141, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },                                        # readback 1 2026-09-28; semantics per sunsynk
+  { name = "priority_load", address = 141, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0 } },                                        # readback 1 2026-09-28 = Load First (LCD "Energy pattern"; sunsynk "Priority Load")
 
   # ------------------------------------------------------- power limits
-  # CONFLICT: 340 is "Max Sell Power" per Developer089 but "Max Solar Power"
-  # per sunsynk. Resolve by reading it back and comparing to the LCD.
-  { name = "max_sell_power", address = 340, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
-  { name = "max_grid_output_power", address = 143, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  # 340 = "Max Solar Power" (LCD/sunsynk/deye_p3; docx googlish "Max Solar
+  # Sell Power") - caps DC/PV input power. Readback 13200 W. Renamed from
+  # max_sell_power 2026-10-11 (Developer089's mislabel).
+  { name = "max_solar_power", address = 340, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
+  # 143 = "Max Sell Power" (LCD/deye_p3 alt; sunsynk "Export Limit power") -
+  # caps power exported to grid. Readback 12000 W. Renamed from
+  # max_grid_output_power 2026-10-11 (Developer089 name from docx wording).
+  { name = "max_sell_power", address = 143, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
   { name = "grid_peak_shaving_power", address = 191, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },  # readback 8000 W 2026-09-28; widen if the LCD range is larger
   # zero-export safety draw; may go slightly negative per sunsynk; readback 20 W.
   { name = "zero_export_power", address = 104, encoding = { type = "s16" }, unit = "W", writable = true, constraint = { type = "number", min = -500, max = 500 } },
@@ -204,10 +208,10 @@ controls = [
   { name = "batt_low_voltage", address = 120, encoding = { type = "u16" }, scale = 0.01, unit = "V", writable = true, constraint = { type = "number", min = 41, max = 60 } },
 
   # ------------------------------------------------ grid protection window
-  # TODO verify semantics: live readback 185 = 276.0 V, 186 = 103.5 V - the
-  # 186 value is far below any plausible 3-phase low-voltage limit (may be
-  # per-cell or a different parameter). Constraints widened to cover actual
-  # device values; re-tighten after checking the LCD grid-protection screen.
+  # TODO verify semantics: live readback 185 = 276.0 V, 186 = 103.5 V - both
+  # within deye_p3's documented 100.0-290.0 V range (which protection stage
+  # each guards is still unconfirmed). Constraints cover actual device
+  # values; re-tighten after checking the LCD grid-protection screen.
   { name = "grid_voltage_high_limit", address = 185, encoding = { type = "u16" }, scale = 0.1, unit = "V", writable = true, constraint = { type = "number", min = 0, max = 300 } },
   { name = "grid_voltage_low_limit", address = 186, encoding = { type = "u16" }, scale = 0.1, unit = "V", writable = true, constraint = { type = "number", min = 0, max = 300 } },
 
@@ -221,6 +225,13 @@ controls = [
   { name = "gen_on_soc", address = 137, encoding = { type = "u16" }, unit = "%", writable = true, constraint = { type = "number", min = 0, max = 100 } },                         # readback 100 2026-09-28 (sunsynk)
 
   # -------------------------------------- time-of-use slots (6 programs)
+  # 146 Time-Of-Use flags (official 3-phase protocol: "Time of Use Selling
+  # enabled", bit0 master enable, bits1-7 Mon..Sun, bit8 work-mode-3 for the
+  # Spanish variant; kellerza "Prog Time Of Use Enabled"/alias "Use Timer",
+  # pydeye splits the same register by day). Live 2026-10-29: 0x00FE = all
+  # weekdays set, master clear -> TOU OFF. Bitmask write: read-modify-write
+  # keeps the weekday bits, only bit0 moves.
+  { name = "tou_enabled", address = 146, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0, bitmask = 1 } },
   # Times are plain HHMM integers (e.g. 630 = 06:30); planner formats/encodes.
   # 172-177 CAVEAT: sunsynk decodes these as packed bitfields (charge bits
   # 0-1, mode bits 2-4, sell bit 5), Developer089 as plain 0-3 selects.

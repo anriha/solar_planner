@@ -115,6 +115,37 @@ fn switch_without_on_is_rejected() {
 }
 
 #[test]
+fn bitmask_switch_parses_and_validates() {
+    let ok = parse(
+        r#"sensors = []
+controls = [ { name = "c", address = 146, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0, bitmask = 1 } } ]"#,
+    )
+    .expect("bitmask switch should load");
+    assert!(matches!(
+        &ok.controls[0].constraint,
+        solar_controller::map::Constraint::Switch { bitmask: Some(1), .. }
+    ));
+    // zero mask, bits outside the mask, and bitmask on non-switch kinds reject
+    for bad in [
+        r#"sensors = []
+controls = [ { name = "c", address = 146, encoding = { type = "u16" }, constraint = { type = "switch", on = 1, off = 0, bitmask = 0 } } ]"#,
+        r#"sensors = []
+controls = [ { name = "c", address = 146, encoding = { type = "u16" }, constraint = { type = "switch", on = 2, off = 0, bitmask = 1 } } ]"#,
+        r#"sensors = []
+controls = [ { name = "c", address = 146, encoding = { type = "u16" }, constraint = { type = "number", min = 0, max = 1, bitmask = 1 } } ]"#,
+        r#"sensors = []
+controls = [ { name = "c", address = 146, encoding = { type = "u32", base_word = "low" }, constraint = { type = "switch", on = 1, off = 0, bitmask = 1 } } ]"#,
+    ] {
+        let err = parse(bad).expect_err(bad);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bitmask") || msg.contains("outside"),
+            "rejected for the wrong reason ({msg}): {bad}"
+        );
+    }
+}
+
+#[test]
 fn select_with_number_field_is_rejected() {
     let err = parse(
         r#"controls = [ { name = "c", address = 142, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "a" } ], min = 0 } } ]"#,

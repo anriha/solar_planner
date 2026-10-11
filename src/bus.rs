@@ -149,6 +149,28 @@ impl BusActor {
         self.next_attempt = Instant::now() + backoff_delay(self.interval, self.fails);
         let _ = self.state.tell(Update::Down).send().await;
     }
+
+    /// Open the bus if the previous cycle's connection is gone, mapping the
+    /// failure onto the write-path error type (journal keeps the detail).
+    async fn ensure_connected(&mut self, control: &ControlDef) -> Result<(), WriteError> {
+        if self.ctx.is_some() {
+            return Ok(());
+        }
+        match connect(&self.cfg) {
+            Ok(ctx) => {
+                self.ctx = Some(ctx);
+                Ok(())
+            }
+            Err(e) => {
+                self.record_failure(anyhow!("connect: {e}")).await;
+                Err(WriteError::Io {
+                    name: control.name.clone(),
+                    address: control.address,
+                    source: anyhow!("connect failed (see journal)"),
+                })
+            }
+        }
+    }
 }
 
 impl Message<Tick> for BusActor {
@@ -214,6 +236,9 @@ pub async fn read_span(ctx: &mut Context, addr: u16, cnt: u16) -> anyhow::Result
 // BusActor owns validation/encoding (2b): the ws reader stays thin, and the
 // mailbox serializes writes with polls (single-master discipline). encode_write
 // is the pure, tested core; the handler adds IO + readback verify (D5).
+// Writes go out as FC16 (write-multiple, one register): this Deye firmware
+// silently ignores FC06 — no exception, no echo, just silence (verified at
+// the wire level with mbpoll 2026-10-11; FC16 answers immediately).
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
@@ -237,6 +262,25 @@ pub enum WriteError {
 /// 1b: select value = option's u16 value) and encode it to the raw register
 /// word. Inverse of decode: value = (raw - offset) * scale.
 pub fn encode_write(control: &ControlDef, value: &serde_json::Value) -> Result<u16, WriteError> {
+    encode_write_inner(control, value, None)
+}
+
+/// Bit-field write: `current` is the register content read just before the
+/// write, so the mask's neighbouring flags survive. Returns the full word to
+/// write (and to compare the readback against).
+pub fn encode_write_masked(
+    control: &ControlDef,
+    value: &serde_json::Value,
+    current: u16,
+) -> Result<u16, WriteError> {
+    encode_write_inner(control, value, Some(current))
+}
+
+fn encode_write_inner(
+    control: &ControlDef,
+    value: &serde_json::Value,
+    current: Option<u16>,
+) -> Result<u16, WriteError> {
     let invalid = |reason: String| WriteError::Invalid {
         name: control.name.clone(),
         address: control.address,
@@ -252,11 +296,24 @@ pub fn encode_write(control: &ControlDef, value: &serde_json::Value) -> Result<u
         return Err(invalid("only u16/s16 controls are writable".into()));
     }
     let raw: i64 = match &control.constraint {
-        Constraint::Switch { on, off } => match value {
-            serde_json::Value::Bool(true) => i64::from(*on),
-            serde_json::Value::Bool(false) => i64::from(*off),
-            _ => return Err(invalid("expected true/false".into())),
-        },
+        Constraint::Switch { on, off, bitmask } => {
+            let bit = match value {
+                serde_json::Value::Bool(true) => *on,
+                serde_json::Value::Bool(false) => *off,
+                _ => return Err(invalid("expected true/false".into())),
+            };
+            match bitmask {
+                None => i64::from(bit),
+                Some(mask) => {
+                    let Some(cur) = current else {
+                        return Err(invalid(
+                            "bitmask write needs the current register value".into(),
+                        ));
+                    };
+                    i64::from((cur & !mask) | (bit & mask))
+                }
+            }
+        }
         Constraint::Select { options } => {
             let Some(v) = value.as_u64() else {
                 return Err(invalid("expected an option value (u16 index)".into()));
@@ -304,9 +361,9 @@ pub struct WriteRegister {
 }
 
 async fn write_register(ctx: &mut Context, addr: u16, raw: u16) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(2), ctx.write_single_register(addr, raw))
+    tokio::time::timeout(Duration::from_secs(2), ctx.write_multiple_registers(addr, &[raw]))
         .await
-        .map_err(|_| anyhow!("no response within 2s"))??
+        .map_err(|_| anyhow!("no write response within 2s"))??
         .map_err(|e| anyhow!("slave exception {e:?}"))
 }
 
@@ -325,21 +382,37 @@ impl Message<WriteRegister> for BusActor {
             .find(|c| c.name == msg.name)
             .ok_or_else(|| WriteError::Unknown(msg.name.clone()))?
             .clone();
-        let raw = encode_write(&control, &msg.value)?;
+        let needs_current = matches!(
+            &control.constraint,
+            Constraint::Switch { bitmask: Some(_), .. }
+        );
 
-        if self.ctx.is_none() {
-            match connect(&self.cfg) {
-                Ok(ctx) => self.ctx = Some(ctx),
+        // Bit-field writes must read the register first so neighbouring flags
+        // survive; plain writes are encoded (and validated) before any IO.
+        let current = if needs_current {
+            self.ensure_connected(&control).await?;
+            let ctx = self.ctx.as_mut().expect("ctx was just set");
+            match read_span(ctx, control.address, 1).await {
+                Ok(words) => Some(words[0]),
                 Err(e) => {
-                    self.record_failure(anyhow!("connect: {e}")).await;
+                    let display = e.to_string();
+                    self.record_failure(e).await;
                     return Err(WriteError::Io {
                         name: control.name,
                         address: control.address,
-                        source: anyhow!("connect failed (see journal)"),
+                        source: anyhow!("pre-write read: {display}"),
                     });
                 }
             }
-        }
+        } else {
+            None
+        };
+        let raw = match current {
+            Some(cur) => encode_write_masked(&control, &msg.value, cur)?,
+            None => encode_write(&control, &msg.value)?,
+        };
+
+        self.ensure_connected(&control).await?;
         let ctx = self.ctx.as_mut().expect("ctx was just set");
 
         let outcome = async {
