@@ -258,6 +258,17 @@ pub enum WriteError {
     },
 }
 
+/// Parse "H:MM"/"HH:MM" into the register's HHMM integer (00:00-23:59).
+fn parse_hhmm(s: &str) -> Option<u16> {
+    let (h, m) = s.split_once(':')?;
+    if h.is_empty() || h.len() > 2 || m.len() != 2 {
+        return None;
+    }
+    let h: u16 = h.parse().ok()?;
+    let m: u16 = m.parse().ok()?;
+    (h <= 23 && m <= 59).then_some(h * 100 + m)
+}
+
 /// Validate a write (D4: reject, never clamp; 3a: reject non-representable;
 /// 1b: select value = option's u16 value) and encode it to the raw register
 /// word. Inverse of decode: value = (raw - offset) * scale.
@@ -323,6 +334,27 @@ fn encode_write_inner(
             }
             v as i64
         }
+        Constraint::Time => match value {
+            serde_json::Value::String(s) => i64::from(parse_hhmm(s).ok_or_else(|| {
+                invalid(format!("expected HH:MM (00:00-23:59), got {s:?}"))
+            })?),
+            serde_json::Value::Number(n) => {
+                let Some(x) = n.as_f64() else {
+                    return Err(invalid("expected HH:MM".into()));
+                };
+                if (x - x.round()).abs() > 1e-6 {
+                    return Err(invalid("time is not a whole number of HHMM".into()));
+                }
+                let v = x.round() as i64;
+                if !(0..=2359).contains(&v) || v % 100 > 59 {
+                    return Err(invalid(format!(
+                        "{v} is not a valid HHMM (00:00-23:59)"
+                    )));
+                }
+                v
+            }
+            _ => return Err(invalid("expected HH:MM string or HHMM integer".into())),
+        },
         Constraint::Number { min, max, .. } => {
             let Some(x) = value.as_f64() else {
                 return Err(invalid("expected a number".into()));

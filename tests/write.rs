@@ -1,7 +1,7 @@
 use serde_json::json;
 use solar_controller::{
     bus::{WriteError, encode_write, encode_write_masked},
-    decode::{Field, decode_field},
+    decode::{DecodeError, Field, decode_field},
     map::{Constraint, ControlDef, Encoding, EMBEDDED_MAP, load_from_str},
 };
 
@@ -67,6 +67,35 @@ fn bitmask_switch_preserves_neighbouring_flags() {
         decode_field(&Field::from(tou), &[0x00FE]).unwrap(),
         solar_controller::decode::Value::Number(0.0)
     );
+}
+
+#[test]
+fn time_encodes_hhmm_both_ways() {
+    let d = def("t", Encoding::U16, 1.0, 0.0, Constraint::Time);
+    assert_eq!(encode_write(&d, &json!("06:30")).unwrap(), 630);
+    assert_eq!(encode_write(&d, &json!("6:30")).unwrap(), 630);
+    assert_eq!(encode_write(&d, &json!("23:59")).unwrap(), 2359);
+    assert_eq!(encode_write(&d, &json!(1835)).unwrap(), 1835);
+    assert_eq!(
+        decode_field(&Field::from(&d), &[630]).unwrap(),
+        solar_controller::decode::Value::Text("06:30".into())
+    );
+    for bad in [
+        json!("24:00"),
+        json!("12:60"),
+        json!("1230"),
+        json!("12:5"),
+        json!(2360),
+        json!(1860),
+        json!(12.5),
+        json!(true),
+    ] {
+        assert!(encode_write(&d, &bad).is_err(), "should reject {bad}");
+    }
+    assert!(matches!(
+        decode_field(&Field::from(&d), &[1860]),
+        Err(DecodeError::InvalidTime(1860))
+    ));
 }
 
 #[test]
@@ -243,6 +272,14 @@ fn real_map_numbers_and_options_roundtrip() {
                     );
                 }
             },
+            Constraint::Time => {
+                let raw = encode_write(c, &json!("18:35")).unwrap();
+                assert_eq!(raw, 1835, "{}", c.name);
+                assert_eq!(
+                    decode_field(&Field::from(c), &[raw]).unwrap(),
+                    solar_controller::decode::Value::Text("18:35".into())
+                );
+            }
         }
     }
 }

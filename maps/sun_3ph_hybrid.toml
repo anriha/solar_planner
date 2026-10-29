@@ -232,16 +232,18 @@ controls = [
   # weekdays set, master clear -> TOU OFF. Bitmask write: read-modify-write
   # keeps the weekday bits, only bit0 moves.
   { name = "tou_enabled", address = 146, encoding = { type = "u16" }, writable = true, constraint = { type = "switch", on = 1, off = 0, bitmask = 1 } },
-  # Times are plain HHMM integers (e.g. 630 = 06:30); planner formats/encodes.
+  # Slot times are wall-clock: `time` constraints decode the raw HHMM
+  # register to "HH:MM" and accept "HH:MM" (or an integer HHMM) on write, so
+  # HA renders a time picker instead of a 0-2359 slider.
   # 172-177 CAVEAT: sunsynk decodes these as packed bitfields (charge bits
   # 0-1, mode bits 2-4, sell bit 5), Developer089 as plain 0-3 selects.
   # Verify via read-back vs LCD before any write.
-  { name = "tou_time_1", address = 148, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_2", address = 149, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_3", address = 150, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_4", address = 151, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_5", address = 152, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
-  { name = "tou_time_6", address = 153, encoding = { type = "u16" }, writable = true, constraint = { type = "number", min = 0, max = 2359 } },
+  { name = "tou_time_1", address = 148, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
+  { name = "tou_time_2", address = 149, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
+  { name = "tou_time_3", address = 150, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
+  { name = "tou_time_4", address = 151, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
+  { name = "tou_time_5", address = 152, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
+  { name = "tou_time_6", address = 153, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } },
   { name = "tou_power_1", address = 154, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
   { name = "tou_power_2", address = 155, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },
   { name = "tou_power_3", address = 156, encoding = { type = "u16" }, unit = "W", writable = true, constraint = { type = "number", min = 0, max = 16000, step = 100 } },

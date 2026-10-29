@@ -173,6 +173,9 @@ pub enum Constraint {
         max: f64,
         step: Option<f64>,
     },
+    /// Wall-clock HHMM register (TOU slot times): decodes to "HH:MM", writes
+    /// accept "HH:MM" or an integer HHMM.
+    Time,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -181,6 +184,7 @@ enum ConstraintKind {
     Switch,
     Select,
     Number,
+    Time,
 }
 
 impl ConstraintKind {
@@ -189,6 +193,7 @@ impl ConstraintKind {
             ConstraintKind::Switch => "switch",
             ConstraintKind::Select => "select",
             ConstraintKind::Number => "number",
+            ConstraintKind::Time => "time",
         }
     }
 }
@@ -304,6 +309,22 @@ fn constraint_from_raw(raw: RawConstraint) -> Result<Constraint, String> {
                 max,
                 step: raw.step,
             })
+        }
+        ConstraintKind::Time => {
+            for (what, present) in [
+                ("on", raw.on.is_some()),
+                ("off", raw.off.is_some()),
+                ("bitmask", raw.bitmask.is_some()),
+                ("options", raw.options.is_some()),
+                ("min", raw.min.is_some()),
+                ("max", raw.max.is_some()),
+                ("step", raw.step.is_some()),
+            ] {
+                if present {
+                    return Err(unexpected(what, "time"));
+                }
+            }
+            Ok(Constraint::Time)
         }
     }
 }
@@ -433,6 +454,12 @@ impl RegisterMap {
                         )));
                     }
                 }
+            }
+            if matches!(c.constraint, Constraint::Time) && c.encoding != Encoding::U16 {
+                return Err(MapError::Invalid(format!(
+                    "control {}: time constraint requires u16 encoding",
+                    c.name
+                )));
             }
         }
         Ok(())

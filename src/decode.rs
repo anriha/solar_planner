@@ -15,6 +15,8 @@ pub enum DecodeError {
     UnknownOption(u16),
     #[error("register string is not valid ASCII")]
     InvalidAscii,
+    #[error("register value {0} is not a valid HHMM time")]
+    InvalidTime(u16),
 }
 
 /// Shared decode input: the fields SensorDef and ControlDef have in common
@@ -30,6 +32,8 @@ pub struct Field<'a> {
     /// Bit field owned by this control (switch constraints only); the rest of
     /// the register belongs to other flags and is not decoded here.
     pub mask: Option<u16>,
+    /// HHMM wall-clock register (time constraints): decoded to "HH:MM".
+    pub time: bool,
 }
 
 impl<'a> From<&'a SensorDef> for Field<'a> {
@@ -42,6 +46,7 @@ impl<'a> From<&'a SensorDef> for Field<'a> {
             offset: s.offset,
             options: s.options.as_deref(),
             mask: None,
+            time: false,
         }
     }
 }
@@ -62,6 +67,7 @@ impl<'a> From<&'a ControlDef> for Field<'a> {
                 Constraint::Switch { bitmask, .. } => *bitmask,
                 _ => None,
             },
+            time: matches!(c.constraint, Constraint::Time),
         }
     }
 }
@@ -74,6 +80,12 @@ pub fn decode_field(field: &Field, words: &[u16]) -> Result<Value, DecodeError> 
         });
     }
     let word = words[0] & field.mask.unwrap_or(u16::MAX);
+    if field.time {
+        if word > 2359 || word % 100 > 59 {
+            return Err(DecodeError::InvalidTime(word));
+        }
+        return Ok(Value::Text(format!("{:02}:{:02}", word / 100, word % 100)));
+    }
     if let Some(options) = field.options {
         let raw = word;
         return options

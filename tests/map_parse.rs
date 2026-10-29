@@ -146,6 +146,27 @@ controls = [ { name = "c", address = 146, encoding = { type = "u32", base_word =
 }
 
 #[test]
+fn time_constraint_parses_and_rejects_extra_fields() {
+    let ok = parse(
+        r#"sensors = []
+controls = [ { name = "t", address = 148, encoding = { type = "u16" }, writable = true, constraint = { type = "time" } } ]"#,
+    )
+    .expect("time constraint should load");
+    assert!(matches!(
+        ok.controls[0].constraint,
+        solar_controller::map::Constraint::Time
+    ));
+    for bad in [
+        r#"sensors = []
+controls = [ { name = "t", address = 148, encoding = { type = "u16" }, constraint = { type = "time", min = 0 } } ]"#,
+        r#"sensors = []
+controls = [ { name = "t", address = 148, encoding = { type = "u32", base_word = "low" }, constraint = { type = "time" } } ]"#,
+    ] {
+        assert!(parse(bad).is_err(), "should reject: {bad}");
+    }
+}
+
+#[test]
 fn select_with_number_field_is_rejected() {
     let err = parse(
         r#"controls = [ { name = "c", address = 142, encoding = { type = "u16" }, constraint = { type = "select", options = [ { value = 0, label = "a" } ], min = 0 } } ]"#,
