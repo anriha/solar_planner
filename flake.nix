@@ -70,7 +70,9 @@
             src = ./.;
             filter =
               path: type:
-              (craneLibNative.filterCargoSources path type) || (builtins.match ".*/maps/.*\\.toml$" path != null);
+              (craneLibNative.filterCargoSources path type)
+              || (builtins.match ".*/maps/.*\\.toml$" path != null)
+              || (builtins.match ".*/tests/fixtures/.*\\.xml$" path != null);
           };
 
           commonArgs = {

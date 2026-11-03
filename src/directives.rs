@@ -22,6 +22,12 @@ impl TryFrom<f64> for Percent {
     }
 }
 
+impl Percent {
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f64")]
 pub struct Price(f64);
@@ -38,13 +44,10 @@ impl TryFrom<f64> for Price {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ForceMode {
-    Auto,
-    Charge,
-    Discharge,
-    Hold,
+impl Price {
+    pub fn get(self) -> f64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Reply, Serialize, Deserialize)]
@@ -52,19 +55,56 @@ pub enum ForceMode {
 pub struct Directives {
     pub version: u64,
     pub planner_enabled: bool,
-    pub force_mode: ForceMode,
-    pub soc_target_hold: Option<Percent>,
-    pub price_override: Option<Price>,
+    /// Lets the planner write to the inverter at all. Default **off**: a deploy that hands
+    /// the planner a bus handle still only plans and reports until this is switched on.
+    /// `planner_enabled` decides whether a plan exists; this decides whether the plan
+    /// reaches the registers. Switching it **off** also disarms.
+    ///
+    /// `serde(default)` because a `directives.json` written before this field existed must
+    /// still load — and must load **off**, not as an error.
+    #[serde(default)]
+    pub actuator_enabled: bool,
+    /// Put the inverter in the safe state by hand: hold the pack at 100 %, sell nothing,
+    /// charge nothing from the grid. Overrides `actuator_enabled` on purpose — it is the
+    /// operator's way to stop the plant without stopping the process.
+    #[serde(default)]
+    pub disarm: bool,
+    /// Hard lower SOC bound, percent. An **export** bound: the planner may serve the site
+    /// load below it, but never sells under it.
+    pub soc_floor: Percent,
+    /// Hard upper SOC bound, percent.
+    pub soc_ceiling: Percent,
+    /// The inverter's single AC interface rating, kW.
+    pub max_power_kw: f64,
+    /// All-in household tariff paid per kWh imported, CZK/kWh.
+    pub buy_price_czk: Price,
+    /// Deducted from the spot price, CZK/kWh.
+    pub sell_fee_czk: Price,
+    /// Measured ÷ forecast, applied to every forecast kWh.
+    pub forecast_calibration: f64,
+    /// Energy-grid resolution the DP walks, kWh.
+    pub energy_step_kwh: f64,
+    /// Action-grid resolution the DP chooses from, kW.
+    pub action_step_kw: f64,
 }
 
 impl Default for Directives {
     fn default() -> Self {
+        let percent = |value: f64| Percent::try_from(value).expect("static bound");
+        let price = |value: f64| Price::try_from(value).expect("static bound");
         Self {
             version: 0,
             planner_enabled: true,
-            force_mode: ForceMode::Auto,
-            soc_target_hold: None,
-            price_override: None,
+            actuator_enabled: false,
+            disarm: false,
+            soc_floor: percent(20.0),
+            soc_ceiling: percent(80.0),
+            max_power_kw: 12.0,
+            buy_price_czk: price(5.0),
+            sell_fee_czk: price(0.5),
+            forecast_calibration: 1.0,
+            energy_step_kwh: 0.32,
+            action_step_kw: 1.2,
         }
     }
 }
@@ -95,9 +135,42 @@ fn set<T: PartialEq>(slot: &mut T, new: T) -> bool {
     }
 }
 
+/// A plain number inside a closed range. Rejected, never clamped — the bridge is the
+/// authority and HA's widget bounds are cosmetic.
+fn number_in(
+    value: &serde_json::Value,
+    name: &str,
+    range: std::ops::RangeInclusive<f64>,
+) -> Result<f64, ApplyError> {
+    let number = value
+        .as_f64()
+        .ok_or_else(|| invalid(name, "expected a number"))?;
+    if range.contains(&number) {
+        Ok(number)
+    } else {
+        Err(invalid(
+            name,
+            &format!("expected {}–{}, got {number}", range.start(), range.end()),
+        ))
+    }
+}
+
+fn percent(value: &serde_json::Value, name: &str) -> Result<Percent, ApplyError> {
+    let number = value
+        .as_f64()
+        .ok_or_else(|| invalid(name, "expected a number"))?;
+    Percent::try_from(number).map_err(|e| invalid(name, &e))
+}
+
+fn price(value: &serde_json::Value, name: &str) -> Result<Price, ApplyError> {
+    let number = value
+        .as_f64()
+        .ok_or_else(|| invalid(name, "expected a number"))?;
+    Price::try_from(number).map_err(|e| invalid(name, &e))
+}
+
 impl Directives {
     pub fn apply(&mut self, name: &str, value: serde_json::Value) -> Result<bool, ApplyError> {
-        const MODES: &str = "expected \"auto\"|\"charge\"|\"discharge\"|\"hold\"";
         let changed = match name {
             "planner_enabled" => {
                 let new = value
@@ -105,42 +178,55 @@ impl Directives {
                     .ok_or_else(|| invalid(name, "expected true/false"))?;
                 set(&mut self.planner_enabled, new)
             }
-            "force_mode" => {
-                let new = match value.as_str() {
-                    Some("auto") => ForceMode::Auto,
-                    Some("charge") => ForceMode::Charge,
-                    Some("discharge") => ForceMode::Discharge,
-                    Some("hold") => ForceMode::Hold,
-                    _ => return Err(invalid(name, MODES)),
-                };
-                set(&mut self.force_mode, new)
+            "actuator_enabled" => {
+                let new = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(name, "expected true/false"))?;
+                set(&mut self.actuator_enabled, new)
             }
-            "soc_target_hold" => {
-                let new = match &value {
-                    serde_json::Value::Null => None,
-                    v => Some(
-                        Percent::try_from(
-                            v.as_f64()
-                                .ok_or_else(|| invalid(name, "expected a number or null"))?,
-                        )
-                        .map_err(|e| invalid(name, &e))?,
-                    ),
-                };
-                set(&mut self.soc_target_hold, new)
+            "disarm" => {
+                let new = value
+                    .as_bool()
+                    .ok_or_else(|| invalid(name, "expected true/false"))?;
+                set(&mut self.disarm, new)
             }
-            "price_override" => {
-                let new = match &value {
-                    serde_json::Value::Null => None,
-                    v => Some(
-                        Price::try_from(
-                            v.as_f64()
-                                .ok_or_else(|| invalid(name, "expected a number or null"))?,
-                        )
-                        .map_err(|e| invalid(name, &e))?,
-                    ),
-                };
-                set(&mut self.price_override, new)
+            "soc_floor" => {
+                let new = percent(&value, name)?;
+                if new.get() >= self.soc_ceiling.get() {
+                    return Err(invalid(name, "soc_floor must stay below soc_ceiling"));
+                }
+                set(&mut self.soc_floor, new)
             }
+            "soc_ceiling" => {
+                let new = percent(&value, name)?;
+                if new.get() <= self.soc_floor.get() {
+                    return Err(invalid(name, "soc_ceiling must stay above soc_floor"));
+                }
+                set(&mut self.soc_ceiling, new)
+            }
+            "max_power_kw" => {
+                set(&mut self.max_power_kw, number_in(&value, name, 0.5..=30.0)?)
+            }
+            "buy_price_czk" => set(&mut self.buy_price_czk, price(&value, name)?),
+            "sell_fee_czk" => {
+                let new = price(&value, name)?;
+                if new.get() < 0.0 {
+                    return Err(invalid(name, "expected a non-negative fee"));
+                }
+                set(&mut self.sell_fee_czk, new)
+            }
+            "forecast_calibration" => set(
+                &mut self.forecast_calibration,
+                number_in(&value, name, 0.1..=3.0)?,
+            ),
+            "energy_step_kwh" => set(
+                &mut self.energy_step_kwh,
+                number_in(&value, name, 0.05..=5.0)?,
+            ),
+            "action_step_kw" => set(
+                &mut self.action_step_kw,
+                number_in(&value, name, 0.1..=5.0)?,
+            ),
             _ => return Err(ApplyError::Unknown(name.to_string())),
         };
         if changed {
@@ -153,7 +239,15 @@ impl Directives {
 pub fn load(path: &Path) -> anyhow::Result<Option<Directives>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => {
-            Ok(Some(serde_json::from_str(&raw).map_err(|e| {
+            let mut value: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("directives file {path:?}: {e}"))?;
+            // `force_mode` was deleted 2026-11-06. A file written by an older binary still
+            // carries it, and `deny_unknown_fields` would turn that into a startup failure;
+            // drop the retired key instead. Every other unknown field is still an error.
+            if let Some(object) = value.as_object_mut() {
+                object.remove("force_mode");
+            }
+            Ok(Some(serde_json::from_value(value).map_err(|e| {
                 anyhow::anyhow!("directives file {path:?}: {e}")
             })?))
         }
@@ -239,9 +333,16 @@ impl Message<GetCurrent> for DirectivesActor {
 //
 // Exact JSON the bridge must emit (frozen contract; HA side ships against it):
 //   {"name":"planner_enabled","type":"bool"}
-//   {"name":"force_mode","type":"enum","options":["auto","charge","discharge","hold"]}
-//   {"name":"soc_target_hold","type":"number","min":0.0,"max":100.0,"nullable":true,"unit":"%"}
-//   {"name":"price_override","type":"number","min":-10000.0,"max":10000.0,"nullable":true,"unit":"CZK/kWh"}
+//   {"name":"actuator_enabled","type":"bool"}
+//   {"name":"disarm","type":"bool"}
+//   {"name":"soc_floor","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
+//   {"name":"soc_ceiling","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
+//   {"name":"max_power_kw","type":"number","min":0.5,"max":30.0,"nullable":false,"unit":"kW"}
+//   {"name":"buy_price_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"}
+//   {"name":"sell_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"}
+//   {"name":"forecast_calibration","type":"number","min":0.1,"max":3.0,"nullable":false}
+//   {"name":"energy_step_kwh","type":"number","min":0.05,"max":5.0,"nullable":false,"unit":"kWh"}
+//   {"name":"action_step_kw","type":"number","min":0.1,"max":5.0,"nullable":false,"unit":"kW"}
 //
 // min/max mirror the Percent/Price newtype bounds; nullable marks Option fields.
 // Ranges here are UX clamps only — Directives::apply() stays the validation
@@ -252,10 +353,6 @@ impl Message<GetCurrent> for DirectivesActor {
 enum DirectiveSpec {
     Bool {
         name: &'static str,
-    },
-    Enum {
-        name: &'static str,
-        options: &'static [&'static str],
     },
     Number {
         name: &'static str,
@@ -275,23 +372,65 @@ pub fn directive_schema() -> serde_json::Value {
         DirectiveSpec::Bool {
             name: "planner_enabled",
         },
-        DirectiveSpec::Enum {
-            name: "force_mode",
-            options: &["auto", "charge", "discharge", "hold"],
+        DirectiveSpec::Bool {
+            name: "actuator_enabled",
         },
+        DirectiveSpec::Bool { name: "disarm" },
         DirectiveSpec::Number {
-            name: "soc_target_hold",
+            name: "soc_floor",
             min: 0.0,
             max: 100.0,
-            nullable: true,
+            nullable: false,
             unit: Some("%"),
         },
         DirectiveSpec::Number {
-            name: "price_override",
-            min: -10_000.0,
+            name: "soc_ceiling",
+            min: 0.0,
+            max: 100.0,
+            nullable: false,
+            unit: Some("%"),
+        },
+        DirectiveSpec::Number {
+            name: "max_power_kw",
+            min: 0.5,
+            max: 30.0,
+            nullable: false,
+            unit: Some("kW"),
+        },
+        DirectiveSpec::Number {
+            name: "buy_price_czk",
+            min: 0.0,
             max: 10_000.0,
-            nullable: true,
+            nullable: false,
             unit: Some("CZK/kWh"),
+        },
+        DirectiveSpec::Number {
+            name: "sell_fee_czk",
+            min: 0.0,
+            max: 10_000.0,
+            nullable: false,
+            unit: Some("CZK/kWh"),
+        },
+        DirectiveSpec::Number {
+            name: "forecast_calibration",
+            min: 0.1,
+            max: 3.0,
+            nullable: false,
+            unit: None,
+        },
+        DirectiveSpec::Number {
+            name: "energy_step_kwh",
+            min: 0.05,
+            max: 5.0,
+            nullable: false,
+            unit: Some("kWh"),
+        },
+        DirectiveSpec::Number {
+            name: "action_step_kw",
+            min: 0.1,
+            max: 5.0,
+            nullable: false,
+            unit: Some("kW"),
         },
     ])
     .expect("static schema always serializes")

@@ -199,6 +199,9 @@ impl Message<Tick> for BusActor {
 
         match poll_once(ctx, &self.map, &self.spans).await {
             Ok(snap) => {
+                if self.fails > 0 {
+                    eprintln!("[bus] link up after {} failed attempt(s)", self.fails);
+                }
                 self.fails = 0;
                 self.next_attempt = Instant::now();
                 let _ = self.state.tell(Update::Good(snap)).send().await;

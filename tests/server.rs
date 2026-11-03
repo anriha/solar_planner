@@ -74,7 +74,7 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
     assert_eq!(hello["meta"]["sensors"].as_array().unwrap().len(), 90);
     assert_eq!(hello["meta"]["controls"].as_array().unwrap().len(), 65);
     assert_eq!(hello["state"]["link_ok"], false);
-    assert_eq!(hello["directives"]["force_mode"], "auto");
+    assert_eq!(hello["directives"]["disarm"], false);
 
     ws.send(Message::text(json!({"type": "ping"}).to_string()))
         .await
@@ -82,7 +82,7 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
     assert_eq!(recv_json(&mut ws).await["type"], "pong");
 
     ws.send(Message::text(
-        json!({"type": "cmd", "id": "c1", "name": "force_mode", "value": "charge"}).to_string(),
+        json!({"type": "cmd", "id": "c1", "name": "disarm", "value": true}).to_string(),
     ))
     .await
     .unwrap();
@@ -96,11 +96,11 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
                 saw_ack = true;
                 assert_eq!(m["id"], "c1");
                 assert_eq!(m["ok"], true);
-                assert_eq!(m["directives"]["force_mode"], "charge");
+                assert_eq!(m["directives"]["disarm"], true);
             }
             Some("state") => {
                 saw_state = true;
-                assert_eq!(m["directives"]["force_mode"], "charge");
+                assert_eq!(m["directives"]["disarm"], true);
             }
             other => panic!("unexpected message type: {other:?}"),
         }
@@ -112,7 +112,7 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
         &std::fs::read_to_string(dir.path().join("directives.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(persisted["force_mode"], "charge");
+    assert_eq!(persisted["disarm"], true);
     assert_eq!(persisted["version"], 1);
 }
 

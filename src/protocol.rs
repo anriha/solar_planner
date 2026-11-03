@@ -3,21 +3,27 @@ use std::collections::BTreeMap;
 use kameo::Reply;
 use serde::{Deserialize, Serialize};
 
-use crate::{decode::Value, directives::Directives, telemetry::Snapshot};
+use crate::{decode::Value, directives::Directives, planner::Plan, telemetry::Snapshot};
 
 #[derive(Debug, Clone, Default, Reply, Serialize)]
 pub struct StatePayload {
     pub ts: u64,
     pub link_ok: bool,
     pub values: BTreeMap<String, Value>,
+    /// The latest dispatch plan, absent while the planner is off or has no horizon.
+    /// Carried by `Hello` and `/state` — the *complete* snapshot — while live subscribers
+    /// get it as a separate `ServerMsg::Plan` frame, so the 5 s poll stays small.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl StatePayload {
-    pub fn from_snapshot(snap: Snapshot) -> Self {
+    pub fn from_snapshot(snap: Snapshot, plan: Option<Plan>) -> Self {
         Self {
             ts: snap.ts,
             link_ok: true,
             values: snap.values,
+            plan,
         }
     }
 }
@@ -30,12 +36,19 @@ pub enum ServerMsg {
         state: StatePayload,
         directives: Directives,
     },
+    /// Telemetry, one frame per poll. It deliberately does **not** carry the plan: a full
+    /// horizon is ~60–80 KB and the poll is 5 s, which would be about 1.2 GB per day per
+    /// subscriber for a value that changes once a minute. The plan rides `Hello` (the
+    /// complete snapshot on connect) and `Plan` (one frame per change).
     State {
         ts: u64,
         link_ok: bool,
         values: BTreeMap<String, Value>,
         directives: Directives,
     },
+    /// The plan, pushed when the planner publishes one and re-sent to a subscriber that
+    /// catches up after lagging. `None` withdraws it (planner off, or no horizon yet).
+    Plan { plan: Option<Plan> },
     CmdAck {
         id: String,
         ok: bool,

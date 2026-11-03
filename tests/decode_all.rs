@@ -5,6 +5,7 @@ use solar_controller::{
     decode::Value,
     map::{Constraint, EMBEDDED_MAP, load_from_str},
     spans::{MERGE_GAP, ReadSpan, plan_spans},
+    telemetry::PlanningSignals,
 };
 
 fn synthetic_image(map: &solar_controller::map::RegisterMap, spans: &[ReadSpan]) -> BTreeMap<u16, u16> {
@@ -73,4 +74,19 @@ fn fails_loudly_when_a_span_is_missing() {
     let err = decode_all(&map, &reads).unwrap_err().to_string();
     assert!(err.contains("not covered"), "unexpected error: {err}");
     assert!(err.contains("serial_number"), "error should name the sensor: {err}");
+}
+
+/// The planner's view of the snapshot is a rename detector: if `battery_soc` or
+/// `battery_power` ever leaves the map, this fails here rather than at 03:00 on the Pi.
+#[test]
+fn planning_signals_extract_from_the_real_map() {
+    let map = load_from_str(EMBEDDED_MAP).unwrap();
+    let spans = plan_spans(&map, MERGE_GAP);
+
+    let snap = decode_all(&map, &synthetic_reads(&spans, &synthetic_image(&map, &spans))).unwrap();
+    let signals = PlanningSignals::extract(&snap).expect("both planner signals decode");
+
+    assert_eq!(signals.battery_soc, 0.0);
+    assert_eq!(signals.soc_fraction(), 0.0);
+    assert_eq!(signals.battery_power_w, 0.0);
 }

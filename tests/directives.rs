@@ -1,47 +1,83 @@
 use serde_json::json;
-use solar_controller::directives::{
-    ApplyError, Directives, ForceMode, Percent, Price, directive_schema, load, save,
-};
+use solar_controller::directives::{ApplyError, Directives, Percent, Price, directive_schema, load, save};
 
 #[test]
-fn defaults_are_neutral() {
+fn defaults_are_the_phase_3a_tuning() {
     let d = Directives::default();
     assert_eq!(d.version, 0);
     assert!(d.planner_enabled);
-    assert_eq!(d.force_mode, ForceMode::Auto);
-    assert_eq!(d.soc_target_hold, None);
-    assert_eq!(d.price_override, None);
+    assert!(
+        !d.actuator_enabled,
+        "the planner must be able to run without owning the registers"
+    );
+    assert!(!d.disarm, "a fresh deploy is armed by the switch, not disarmed");
+    assert_eq!(d.soc_floor, Percent::try_from(20.0).unwrap());
+    assert_eq!(d.soc_ceiling, Percent::try_from(80.0).unwrap());
+    assert_eq!(d.max_power_kw, 12.0);
+    assert_eq!(d.buy_price_czk, Price::try_from(5.0).unwrap());
+    assert_eq!(d.sell_fee_czk, Price::try_from(0.5).unwrap());
+    assert_eq!(d.forecast_calibration, 1.0);
+    assert_eq!(d.energy_step_kwh, 0.32);
+    assert_eq!(d.action_step_kw, 1.2);
 }
 
 #[test]
 fn apply_each_directive_and_bump_version() {
     let mut d = Directives::default();
     assert!(d.apply("planner_enabled", json!(false)).unwrap());
-    assert!(d.apply("force_mode", json!("charge")).unwrap());
-    assert!(d.apply("soc_target_hold", json!(50)).unwrap());
-    assert!(d.apply("price_override", json!(12.5)).unwrap());
+    assert!(d.apply("actuator_enabled", json!(true)).unwrap());
+    assert!(d.apply("disarm", json!(true)).unwrap());
+    assert!(d.apply("soc_floor", json!(25)).unwrap());
+    assert!(d.apply("soc_ceiling", json!(75)).unwrap());
+    assert!(d.apply("max_power_kw", json!(10.0)).unwrap());
+    assert!(d.apply("buy_price_czk", json!(4.5)).unwrap());
+    assert!(d.apply("sell_fee_czk", json!(0.75)).unwrap());
+    assert!(d.apply("forecast_calibration", json!(0.45)).unwrap());
+    assert!(d.apply("energy_step_kwh", json!(0.4)).unwrap());
+    assert!(d.apply("action_step_kw", json!(1.0)).unwrap());
+
     assert!(!d.planner_enabled);
-    assert_eq!(d.force_mode, ForceMode::Charge);
-    assert_eq!(d.soc_target_hold, Some(Percent::try_from(50.0).unwrap()));
-    assert_eq!(d.price_override, Some(Price::try_from(12.5).unwrap()));
-    assert_eq!(d.version, 4);
+    assert!(d.actuator_enabled);
+    assert!(d.disarm);
+    assert_eq!(d.soc_floor.get(), 25.0);
+    assert_eq!(d.soc_ceiling.get(), 75.0);
+    assert_eq!(d.max_power_kw, 10.0);
+    assert_eq!(d.buy_price_czk.get(), 4.5);
+    assert_eq!(d.sell_fee_czk.get(), 0.75);
+    assert_eq!(d.forecast_calibration, 0.45);
+    assert_eq!(d.energy_step_kwh, 0.4);
+    assert_eq!(d.action_step_kw, 1.0);
+    assert_eq!(d.version, 11);
 }
 
 #[test]
-fn null_clears_optionals() {
-    let mut d = Directives::default();
-    assert!(d.apply("soc_target_hold", json!(30)).unwrap());
-    assert!(d.apply("price_override", json!(1.0)).unwrap());
-    assert!(d.apply("soc_target_hold", json!(null)).unwrap());
-    assert!(d.apply("price_override", json!(null)).unwrap());
-    assert_eq!(d.soc_target_hold, None);
-    assert_eq!(d.price_override, None);
+fn the_soc_bounds_cannot_cross() {
+    let mut d = Directives::default(); // 20 / 80
+
+    assert!(
+        matches!(
+            d.apply("soc_floor", json!(85)),
+            Err(ApplyError::Invalid { .. })
+        ),
+        "a floor above the ceiling must be rejected, not clamped"
+    );
+    assert!(
+        matches!(
+            d.apply("soc_ceiling", json!(15)),
+            Err(ApplyError::Invalid { .. })
+        ),
+        "a ceiling below the floor must be rejected"
+    );
+    assert_eq!(d.soc_floor.get(), 20.0, "a rejected apply changes nothing");
+    assert_eq!(d.soc_ceiling.get(), 80.0);
+    assert_eq!(d.version, 0);
 }
 
 #[test]
 fn no_op_apply_changes_nothing() {
     let mut d = Directives::default(); // planner_enabled is already true
     assert!(!d.apply("planner_enabled", json!(true)).unwrap());
+    assert!(!d.apply("soc_floor", json!(20)).unwrap());
     assert_eq!(d.version, 0);
 }
 
@@ -50,6 +86,11 @@ fn unknown_directive_rejected() {
     let mut d = Directives::default();
     assert!(matches!(
         d.apply("grid_feed_in", json!(1)),
+        Err(ApplyError::Unknown(_))
+    ));
+    // Deleted 2026-11-06; the enum directive must not come back through the API.
+    assert!(matches!(
+        d.apply("force_mode", json!("hold")),
         Err(ApplyError::Unknown(_))
     ));
 }
@@ -62,43 +103,53 @@ fn type_and_range_errors() {
         Err(ApplyError::Invalid { .. })
     ));
     assert!(matches!(
-        d.apply("force_mode", json!("turbo")),
+        d.apply("actuator_enabled", json!(1)),
         Err(ApplyError::Invalid { .. })
     ));
     assert!(matches!(
-        d.apply("force_mode", json!(3)),
+        d.apply("disarm", json!("yes")),
         Err(ApplyError::Invalid { .. })
     ));
     assert!(matches!(
-        d.apply("soc_target_hold", json!(100.5)),
+        d.apply("soc_floor", json!(100.5)),
         Err(ApplyError::Invalid { .. })
     ));
     assert!(matches!(
-        d.apply("soc_target_hold", json!(-1)),
+        d.apply("soc_floor", json!(-1)),
         Err(ApplyError::Invalid { .. })
     ));
     assert!(matches!(
-        d.apply("soc_target_hold", json!("80")),
-        Err(ApplyError::Invalid { .. })
-    ));
-    assert!(matches!(
-        d.apply("price_override", json!(20_000)),
+        d.apply("soc_floor", json!("80")),
         Err(ApplyError::Invalid { .. })
     ));
 }
 
 #[test]
-fn negative_spot_price_is_valid() {
+fn numbers_outside_their_range_are_rejected_not_clamped() {
     let mut d = Directives::default();
-    assert!(d.apply("price_override", json!(-0.5)).unwrap());
-    assert_eq!(d.price_override, Some(Price::try_from(-0.5).unwrap()));
+    for (name, value) in [
+        ("max_power_kw", json!(0.1)),
+        ("max_power_kw", json!(31.0)),
+        ("buy_price_czk", json!(10_001.0)),
+        ("sell_fee_czk", json!(-0.5)),
+        ("forecast_calibration", json!(0.05)),
+        ("forecast_calibration", json!(4.0)),
+        ("energy_step_kwh", json!(0.01)),
+        ("action_step_kw", json!(0.05)),
+    ] {
+        assert!(
+            matches!(d.apply(name, value.clone()), Err(ApplyError::Invalid { .. })),
+            "{name} accepted {value}"
+        );
+    }
+    assert_eq!(d, Directives::default(), "no rejected apply left a trace");
 }
 
 #[test]
 fn json_roundtrip() {
     let mut d = Directives::default();
-    d.apply("force_mode", json!("hold")).unwrap();
-    d.apply("soc_target_hold", json!(45)).unwrap();
+    d.apply("disarm", json!(true)).unwrap();
+    d.apply("soc_floor", json!(35)).unwrap();
     let back: Directives = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
     assert_eq!(d, back);
 }
@@ -110,11 +161,49 @@ fn persistence_roundtrip_and_missing_file() {
     assert!(load(&path).unwrap().is_none());
 
     let mut d = Directives::default();
-    assert!(d.apply("force_mode", json!("hold")).unwrap());
+    assert!(d.apply("disarm", json!(true)).unwrap());
     save(&path, &d).unwrap();
     assert_eq!(load(&path).unwrap(), Some(d));
     // atomic write leaves no residue
     assert!(!dir.path().join("directives.json.tmp").exists());
+}
+
+#[test]
+fn a_file_written_before_the_switch_existed_loads_disabled() {
+    // The exact shape the pre-switch binary persisted: ten fields, no actuator_enabled and
+    // a `force_mode` that has since been deleted. Without the defaults this is a startup
+    // failure; with the migration the switch must come up OFF and the retired key dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("directives.json");
+    std::fs::write(
+        &path,
+        r#"{"version":3,"planner_enabled":true,"force_mode":"auto",
+            "soc_floor":25.0,"soc_ceiling":75.0,"max_power_kw":10.0,
+            "buy_price_czk":4.5,"sell_fee_czk":0.75,"forecast_calibration":1.0,
+            "energy_step_kwh":0.32,"action_step_kw":1.2}"#,
+    )
+    .unwrap();
+
+    let loaded = load(&path).unwrap().expect("a legacy file still loads");
+    assert_eq!(loaded.version, 3);
+    assert_eq!(loaded.soc_floor.get(), 25.0);
+    assert!(!loaded.actuator_enabled, "an upgraded deploy stays read-only");
+    assert!(!loaded.disarm);
+}
+
+#[test]
+fn other_unknown_fields_are_still_a_loud_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("directives.json");
+    std::fs::write(
+        &path,
+        r#"{"version":3,"planner_enabled":true,"soc_floor":25.0,"soc_ceiling":75.0,
+            "max_power_kw":10.0,"buy_price_czk":4.5,"sell_fee_czk":0.75,
+            "forecast_calibration":1.0,"energy_step_kwh":0.32,"action_step_kw":1.2,
+            "typo_field":true}"#,
+    )
+    .unwrap();
+    assert!(load(&path).is_err(), "only force_mode is migrated");
 }
 
 #[test]
@@ -129,10 +218,20 @@ fn corrupt_file_is_a_loud_error() {
 fn directive_schema_matches_frozen_contract() {
     // serde emits internally-tagged variants with alphabetically sorted keys
     // (content buffering), so compare parsed JSON, not bytes.
-    let actual: serde_json::Value = serde_json::from_str(&serde_json::to_string(&directive_schema()).unwrap())
-        .unwrap();
+    let actual: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&directive_schema()).unwrap()).unwrap();
     let expected: serde_json::Value = serde_json::from_str(
-        r#"[{"type":"bool","name":"planner_enabled"},{"type":"enum","name":"force_mode","options":["auto","charge","discharge","hold"]},{"type":"number","name":"soc_target_hold","min":0.0,"max":100.0,"nullable":true,"unit":"%"},{"type":"number","name":"price_override","min":-10000.0,"max":10000.0,"nullable":true,"unit":"CZK/kWh"}]"#,
+        r#"[{"type":"bool","name":"planner_enabled"},
+            {"type":"bool","name":"actuator_enabled"},
+            {"type":"bool","name":"disarm"},
+            {"type":"number","name":"soc_floor","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
+            {"type":"number","name":"soc_ceiling","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
+            {"type":"number","name":"max_power_kw","min":0.5,"max":30.0,"nullable":false,"unit":"kW"},
+            {"type":"number","name":"buy_price_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"},
+            {"type":"number","name":"sell_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"},
+            {"type":"number","name":"forecast_calibration","min":0.1,"max":3.0,"nullable":false},
+            {"type":"number","name":"energy_step_kwh","min":0.05,"max":5.0,"nullable":false,"unit":"kWh"},
+            {"type":"number","name":"action_step_kw","min":0.1,"max":5.0,"nullable":false,"unit":"kW"}]"#,
     )
     .unwrap();
     assert_eq!(actual, expected);

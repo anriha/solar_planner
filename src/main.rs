@@ -4,7 +4,20 @@ use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use kameo::actor::{ActorRef, Spawn};
 use solar_controller::{
-    bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick}, config, directives::{DirectivesActor, directive_schema}, map::{EMBEDDED_MAP, RegisterMap, load_from_str}, probe, server::{self, AppState}, state::{GetState, StateActor},
+    bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick, WriteRegister},
+    config,
+    directives::{Directives, DirectivesActor, directive_schema},
+    map::{EMBEDDED_MAP, RegisterMap, load_from_str},
+    planner::{
+        actor::{PLANNER_INTERVAL, PlannerActor, drive as planner_drive, horizon_params},
+        actuator,
+        forecast::{ForecastSolar, Site},
+        horizon::HorizonActor,
+        price::OteClient,
+    },
+    probe,
+    server::{self, AppState},
+    state::{GetState, StateActor},
 };
 
 #[derive(Parser)]
@@ -73,6 +86,39 @@ async fn drive(bus: ActorRef<BusActor>, interval: Duration) -> anyhow::Result<()
     }
 }
 
+/// Ctrl-C or SIGTERM: the point of the signal is to leave the inverter in the safe state
+/// before the process disappears. Registers survive a restart; a `selling_first` armed at
+/// shutdown would not.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await;
+}
+
+/// Best-effort safe state on the way out: the globals only, each with the bus actor's own
+/// timeout, so a dead bus cannot hang the shutdown.
+async fn disarm_on_shutdown(bus: &ActorRef<BusActor>) {
+    for target in actuator::shutdown_targets() {
+        let _ = bus
+            .ask(WriteRegister {
+                name: target.name,
+                value: target.write,
+            })
+            .await;
+    }
+}
+
 async fn run(cfg: config::Config) -> anyhow::Result<()> {
     if cfg.token.is_empty() {
         bail!(
@@ -103,6 +149,41 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
     ));
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
+    eprintln!(
+        "[main] bridge on {} (port {}, poll {}s), directives {}",
+        cfg.bind, cfg.port, cfg.interval_secs, cfg.directives_path
+    );
+
+    // The planner: its own feeds, its own minute tick, publishing through the state actor.
+    // It is not on the poll path — a slow OTE call must never delay a Modbus cycle.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    let horizon = HorizonActor::new(
+        OteClient::new(http.clone()),
+        ForecastSolar::new(
+            http,
+            Site {
+                latitude: cfg.site.latitude,
+                longitude: cfg.site.longitude,
+                declination: cfg.site.declination,
+                azimuth: cfg.site.azimuth,
+                kwp: cfg.site.kwp,
+            },
+        ),
+        horizon_params(&Directives::default()),
+    );
+    let planner = PlannerActor::spawn(PlannerActor::new(
+        horizon,
+        state_ref.clone(),
+        directives_ref.clone(),
+        Some(bus_ref.clone()),
+    ));
+    tokio::spawn(async move {
+        if let Err(error) = planner_drive(planner, PLANNER_INTERVAL).await {
+            eprintln!("[planner] driver stopped: {error}");
+        }
+    });
     let app = AppState {
         meta,
         state: state_ref,
@@ -112,7 +193,14 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
     };
     tokio::spawn(server::serve(listener, app));
 
-    drive(bus_ref, interval).await
+    tokio::select! {
+        result = drive(bus_ref.clone(), interval) => result,
+        _ = shutdown_signal() => {
+            eprintln!("[main] shutting down; disarming the actuator");
+            disarm_on_shutdown(&bus_ref).await;
+            Ok(())
+        }
+    }
 }
 
 #[tokio::main]

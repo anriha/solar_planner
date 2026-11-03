@@ -35,7 +35,7 @@ async def async_setup_entry(
 
 
 class DirectiveSelect(DirectiveEntity, SelectEntity):
-    """An enum directive, e.g. force_mode (options are protocol strings)."""
+    """An enum directive (options are protocol strings). None ship today; kept for the next one."""
 
     def __init__(
         self,
