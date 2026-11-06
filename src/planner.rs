@@ -226,10 +226,11 @@ impl TerminalValue {
 
 /// One-way efficiency as a function of the power at which the conversion happens.
 ///
-/// Configured as **anchor points**: the power knots are device facts and live in boot
-/// config; the efficiencies are measurements and are tunable from HA, one per knot.
-/// The actor pairs them into this curve. Piecewise-linear between knots, clamped to the
-/// end segments.
+/// Configured as **anchor points**: [`Directives`](crate::directives::Directives) carries
+/// both coordinates of every point, so a measurement moves a knot rather than only
+/// rescaling a fixed band. Piecewise-linear between knots, clamped to the end segments.
+/// [`EfficiencyCurve::flat`] survives as test scaffolding; production always builds from
+/// the directives' point lists.
 #[derive(Debug, Clone)]
 pub struct EfficiencyCurve<I: Quantity, O: Quantity> {
     /// `(input power, efficiency)` pairs, ascending by input power.

@@ -254,23 +254,217 @@ fn corrupt_file_is_a_loud_error() {
 #[test]
 fn directive_schema_matches_frozen_contract() {
     // serde emits internally-tagged variants with alphabetically sorted keys
-    // (content buffering), so compare parsed JSON, not bytes.
+    // (content buffering), so compare parsed JSON, not bytes. The first twelve entries are
+    // the policy scalars; the rest are the four curves in CURVE_NAMES order, five points ×
+    // (power, efficiency) each.
     let actual: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&directive_schema()).unwrap()).unwrap();
     let expected: serde_json::Value = serde_json::from_str(
-        r#"[{"type":"bool","name":"planner_enabled"},
-            {"type":"bool","name":"actuator_enabled"},
-            {"type":"bool","name":"disarm"},
-            {"type":"number","name":"soc_floor","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
-            {"type":"number","name":"soc_ceiling","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
-            {"type":"number","name":"max_power_kw","min":0.5,"max":30.0,"nullable":false,"unit":"kW"},
-            {"type":"number","name":"buy_distribution_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
-            {"type":"number","name":"buy_seller_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
-            {"type":"number","name":"sell_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
-            {"type":"number","name":"forecast_calibration","min":0.1,"max":3.0,"nullable":false},
-            {"type":"number","name":"energy_step_kwh","min":0.05,"max":5.0,"nullable":false,"unit":"kWh"},
-            {"type":"number","name":"action_step_kw","min":0.1,"max":5.0,"nullable":false,"unit":"kW"}]"#,
+        r#"[
+            {"name":"planner_enabled","type":"bool"},
+            {"name":"actuator_enabled","type":"bool"},
+            {"name":"disarm","type":"bool"},
+            {"max":100.0,"min":0.0,"name":"soc_floor","nullable":false,"type":"number","unit":"%"},
+            {"max":100.0,"min":0.0,"name":"soc_ceiling","nullable":false,"type":"number","unit":"%"},
+            {"max":30.0,"min":0.5,"name":"max_power_kw","nullable":false,"type":"number","unit":"kW"},
+            {"max":10000.0,"min":0.0,"name":"buy_distribution_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
+            {"max":10000.0,"min":0.0,"name":"buy_seller_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
+            {"max":10000.0,"min":0.0,"name":"sell_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
+            {"max":3.0,"min":0.1,"name":"forecast_calibration","nullable":false,"type":"number"},
+            {"max":5.0,"min":0.05,"name":"energy_step_kwh","nullable":false,"type":"number","unit":"kWh"},
+            {"max":5.0,"min":0.1,"name":"action_step_kw","nullable":false,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 1 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_battery_p1_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 1 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_battery_p1_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→battery 2 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_battery_p2_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 2 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_battery_p2_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→battery 3 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_battery_p3_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 3 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_battery_p3_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→battery 4 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_battery_p4_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 4 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_battery_p4_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→battery 5 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_battery_p5_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→battery 5 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_battery_p5_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→grid 1 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_grid_p1_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→grid 1 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_grid_p1_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→grid 2 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_grid_p2_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→grid 2 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_grid_p2_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→grid 3 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_grid_p3_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→grid 3 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_grid_p3_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→grid 4 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_grid_p4_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→grid 4 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_grid_p4_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"PV→grid 5 power","max":30.0,"min":0.0,"mode":"box","name":"pv_to_grid_p5_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"PV→grid 5 efficiency","max":100.0,"min":0.0,"mode":"box","name":"pv_to_grid_p5_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"battery→grid 1 power","max":30.0,"min":0.0,"mode":"box","name":"battery_to_grid_p1_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"battery→grid 1 efficiency","max":100.0,"min":0.0,"mode":"box","name":"battery_to_grid_p1_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"battery→grid 2 power","max":30.0,"min":0.0,"mode":"box","name":"battery_to_grid_p2_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"battery→grid 2 efficiency","max":100.0,"min":0.0,"mode":"box","name":"battery_to_grid_p2_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"battery→grid 3 power","max":30.0,"min":0.0,"mode":"box","name":"battery_to_grid_p3_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"battery→grid 3 efficiency","max":100.0,"min":0.0,"mode":"box","name":"battery_to_grid_p3_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"battery→grid 4 power","max":30.0,"min":0.0,"mode":"box","name":"battery_to_grid_p4_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"battery→grid 4 efficiency","max":100.0,"min":0.0,"mode":"box","name":"battery_to_grid_p4_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"battery→grid 5 power","max":30.0,"min":0.0,"mode":"box","name":"battery_to_grid_p5_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"battery→grid 5 efficiency","max":100.0,"min":0.0,"mode":"box","name":"battery_to_grid_p5_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"grid→battery 1 power","max":30.0,"min":0.0,"mode":"box","name":"grid_to_battery_p1_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"grid→battery 1 efficiency","max":100.0,"min":0.0,"mode":"box","name":"grid_to_battery_p1_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"grid→battery 2 power","max":30.0,"min":0.0,"mode":"box","name":"grid_to_battery_p2_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"grid→battery 2 efficiency","max":100.0,"min":0.0,"mode":"box","name":"grid_to_battery_p2_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"grid→battery 3 power","max":30.0,"min":0.0,"mode":"box","name":"grid_to_battery_p3_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"grid→battery 3 efficiency","max":100.0,"min":0.0,"mode":"box","name":"grid_to_battery_p3_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"grid→battery 4 power","max":30.0,"min":0.0,"mode":"box","name":"grid_to_battery_p4_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"grid→battery 4 efficiency","max":100.0,"min":0.0,"mode":"box","name":"grid_to_battery_p4_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
+            {"category":"config","group":"efficiency","label":"grid→battery 5 power","max":30.0,"min":0.0,"mode":"box","name":"grid_to_battery_p5_kw","nullable":false,"step":0.01,"type":"number","unit":"kW"},
+            {"category":"config","group":"efficiency","label":"grid→battery 5 efficiency","max":100.0,"min":0.0,"mode":"box","name":"grid_to_battery_p5_pct","nullable":false,"step":0.1,"type":"number","unit":"%"}
+        ]"#,
     )
     .unwrap();
     assert_eq!(actual, expected);
 }
+
+/// Float compare for curve coordinates: `pct / 100.0` is not bit-identical to a decimal
+/// literal, and these tests are about the measured numbers, not about ulps.
+fn assert_curve(actual: Vec<(f64, f64)>, expected: &[(f64, f64)]) {
+    assert_eq!(actual.len(), expected.len(), "point count");
+    for (index, ((kw, eta), (want_kw, want_eta))) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (kw - want_kw).abs() < 1e-12 && (eta - want_eta).abs() < 1e-12,
+            "point {index}: got ({kw}, {eta}), want ({want_kw}, {want_eta})"
+        );
+    }
+}
+
+#[test]
+fn defaults_are_the_measured_path_curves() {
+    let d = Directives::default();
+    assert_curve(
+        d.pv_to_battery.fractions(),
+        &[
+            (0.5, 0.87),
+            (1.5, 0.87),
+            (3.0, 0.928),
+            (6.0, 0.943),
+            (10.0, 0.947),
+        ],
+    );
+    assert_curve(d.pv_to_grid.fractions(), &[(2.0, 0.97), (10.0, 0.976)]);
+    assert_curve(
+        d.battery_to_grid.fractions(),
+        &[(0.5, 0.939), (3.0, 0.939), (6.0, 0.96), (10.24, 0.969)],
+    );
+    assert_curve(d.grid_to_battery.fractions(), &[(1.0, 0.95), (9.472, 0.95)]);
+}
+
+#[test]
+fn a_curve_point_is_edited_in_place() {
+    let mut d = Directives::default();
+    let version = d.version;
+    assert!(d.apply("pv_to_battery_p3_pct", json!(93.5)).unwrap());
+    assert_eq!(d.pv_to_battery.points[2].pct, 93.5);
+    assert_eq!(d.pv_to_battery.points[2].kw, 3.0, "power untouched");
+    assert_eq!(d.pv_to_battery.points[0].pct, 87.0, "other points untouched");
+    assert_eq!(d.version, version + 1);
+}
+
+#[test]
+fn curve_points_must_ascend_by_power() {
+    let mut d = Directives::default();
+    let error = d
+        .apply("pv_to_battery_p2_kw", json!(0.4))
+        .expect_err("0.4 kW cannot sit above the 0.5 kW point");
+    assert!(
+        error.to_string().contains("must be above slot 1"),
+        "{error}"
+    );
+    assert_eq!(
+        d.pv_to_battery.points[1].kw, 1.5,
+        "a rejected edit changes nothing"
+    );
+}
+
+#[test]
+fn a_zero_efficiency_disables_a_slot() {
+    let mut d = Directives::default();
+    assert!(d.apply("pv_to_grid_p2_pct", json!(0.0)).unwrap());
+    assert_eq!(d.pv_to_grid.active().count(), 1);
+    assert_curve(d.pv_to_grid.fractions(), &[(2.0, 0.97)]);
+
+    // The last active point cannot be switched off: a path without points is not a curve.
+    assert!(d.apply("pv_to_grid_p1_pct", json!(0.0)).is_err());
+}
+
+#[test]
+fn curve_efficiency_outside_fifty_to_hundred_is_rejected() {
+    let mut d = Directives::default();
+    for bad in [0.943, 20.0, 100.1, -1.0] {
+        assert!(
+            d.apply("pv_to_battery_p1_pct", json!(bad)).is_err(),
+            "{bad} should be rejected"
+        );
+    }
+    assert_eq!(
+        d.pv_to_battery.points[0].pct, 87.0,
+        "nothing was clamped in"
+    );
+}
+
+#[test]
+fn a_no_op_curve_edit_does_not_bump_the_version() {
+    let mut d = Directives::default();
+    let version = d.version;
+    assert!(!d.apply("pv_to_battery_p1_kw", json!(0.5)).unwrap());
+    assert_eq!(d.version, version);
+}
+
+#[test]
+fn a_file_without_curves_gains_the_measured_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("directives.json");
+    std::fs::write(
+        &path,
+        r#"{"version":7,"planner_enabled":true,"actuator_enabled":false,"disarm":false,
+            "soc_floor":20.0,"soc_ceiling":80.0,"max_power_kw":12.0,
+            "buy_distribution_czk":2.515,"buy_seller_fee_czk":0.3,"sell_fee_czk":0.5,
+            "forecast_calibration":1.0,"energy_step_kwh":0.32,"action_step_kw":1.2}"#,
+    )
+    .unwrap();
+    let loaded = load(&path).unwrap().expect("file exists");
+    assert_eq!(loaded.version, 7);
+    assert_curve(
+        loaded.pv_to_battery.fractions(),
+        &[
+            (0.5, 0.87),
+            (1.5, 0.87),
+            (3.0, 0.928),
+            (6.0, 0.943),
+            (10.0, 0.947),
+        ],
+    );
+    assert_curve(
+        loaded.grid_to_battery.fractions(),
+        &[(1.0, 0.95), (9.472, 0.95)],
+    );
+}
+
+#[test]
+fn every_wire_key_has_a_schema_entry() {
+    // The HA number entity reads `directives[name]`: a wire key with no schema entry is an
+    // invisible value, and a schema entry with no wire key is a dead entity.
+    let wire = Directives::default().wire_json();
+    let wire_names: std::collections::BTreeSet<String> = wire
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|name| *name != "version")
+        .cloned()
+        .collect();
+    let schema_names: std::collections::BTreeSet<String> = directive_schema()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|spec| spec["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(wire_names, schema_names);
+    assert!(
+        !wire.as_object().unwrap().contains_key("pv_to_battery"),
+        "the curve is flattened on the wire, never nested"
+    );
+}
+

@@ -34,7 +34,8 @@ pub enum ServerMsg {
     Hello {
         meta: serde_json::Value,
         state: StatePayload,
-        directives: Directives,
+        /// The flat directive map (see [`Directives::wire_json`]): one key per entity.
+        directives: serde_json::Value,
     },
     /// Telemetry, one frame per poll. It deliberately does **not** carry the plan: a full
     /// horizon is ~60–80 KB and the poll is 5 s, which would be about 1.2 GB per day per
@@ -44,7 +45,7 @@ pub enum ServerMsg {
         ts: u64,
         link_ok: bool,
         values: BTreeMap<String, Value>,
-        directives: Directives,
+        directives: serde_json::Value,
     },
     /// The plan, pushed when the planner publishes one and re-sent to a subscriber that
     /// catches up after lagging. `None` withdraws it (planner off, or no horizon yet).
@@ -54,7 +55,7 @@ pub enum ServerMsg {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        directives: Directives,
+        directives: serde_json::Value,
     },
     WriteAck {
         id: String,
@@ -74,7 +75,7 @@ impl ServerMsg {
             ts: payload.ts,
             link_ok: payload.link_ok,
             values: payload.values.clone(),
-            directives: directives.clone(),
+            directives: directives.wire_json(),
         }
     }
 

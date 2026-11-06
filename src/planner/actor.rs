@@ -8,9 +8,10 @@
 //!   a stale window is a legal input, and a failed refresh only costs freshness.
 //! * The plan is published through `StateActor`, so it rides on every WebSocket frame.
 //!   Withdrawing it (`Update::Plan(None)`) is how "the planner is off" is expressed.
-//! * Device facts (pack capacity, pack power limit, the measured efficiency knots) are
-//!   constants here: they change when the hardware does, not when a policy does. Policy
-//!   lives in [`Directives`].
+//! * Device facts (pack capacity, pack power limit) are constants here: they change when
+//!   the hardware does, not when a policy does. Policy lives in [`Directives`], and so do
+//!   the four measured efficiency curves — they are measurements of this plant, retunable
+//!   from HA one point at a time.
 
 use kameo::actor::ActorRef;
 use kameo::message::Message;
@@ -19,7 +20,7 @@ use kameo::Actor;
 use thiserror::Error;
 
 use crate::bus::{BusActor, WriteRegister};
-use crate::directives::{Directives, DirectivesActor, GetCurrent};
+use crate::directives::{Directives, DirectivesActor, GetCurrent, PathCurve};
 use crate::planner::actuator::{self, ActuatorParams};
 use crate::planner::forecast::PvSource;
 use crate::planner::horizon::{HorizonActor, HorizonError, HorizonParams};
@@ -30,7 +31,7 @@ use crate::planner::{
 };
 use crate::state::{GetState, StateActor, Update};
 use crate::telemetry::{ExtractError, PlanningSignals};
-use crate::units::{AcKw, CzkPerKwh, DcKw, DcKwh};
+use crate::units::{AcKw, CzkPerKwh, DcKw, DcKwh, Quantity};
 
 /// Reg 102 = 628 Ah at ~51.2 V.
 const CAPACITY_KWH: f64 = 32.0;
@@ -74,39 +75,36 @@ pub enum PlannerError {
 /// `terminal` is passed in rather than computed here: it is a statistic over the price
 /// history, which the horizon owns, and deriving it from anything else would mean a second
 /// copy of the rule.
+///
+/// The four curves come from [`Directives`] as editable `(power, η)` points, so a
+/// measurement corrected from HA is what the next solve prices — no rebuild, no restart.
 pub fn device_params(directives: &Directives, terminal: TerminalValue) -> Params {
     Params {
         capacity_kwh: DcKwh::new(CAPACITY_KWH),
         max_power_kw: AcKw::new(directives.max_power_kw),
         battery_max_kw: DcKw::new(BATTERY_MAX_KW),
         grid_charge_max_kw: DcKw::new(GRID_CHARGE_MAX_KW),
-        // PV → pack: 94.7 % at 5–9 kW, 94.3 % at 3–5, 92.8 % at 1.5–3, 87.0 % below 1.5.
-        pv_to_battery: EfficiencyCurve::new(vec![
-            (DcKw::new(0.5), 0.870),
-            (DcKw::new(1.5), 0.870),
-            (DcKw::new(3.0), 0.928),
-            (DcKw::new(6.0), 0.943),
-            (DcKw::new(10.0), 0.947),
-        ])
-        .expect("static knots"),
-        // PV → AC: 96–98 % across the range, nameplate 97.0 Euro.
-        pv_to_grid: EfficiencyCurve::flat(0.97),
-        // Pack → AC: 96.9 % at 6–11 kW, 96.0 % at 3–6, 93.9 % below 3.
-        battery_to_grid: EfficiencyCurve::new(vec![
-            (DcKw::new(0.5), 0.939),
-            (DcKw::new(3.0), 0.939),
-            (DcKw::new(6.0), 0.960),
-            (DcKw::new(BATTERY_MAX_KW), 0.969),
-        ])
-        .expect("static knots"),
-        // AC → pack: unmeasured, 95 % is the working assumption.
-        grid_to_battery: EfficiencyCurve::flat(0.95),
+        pv_to_battery: curve(&directives.pv_to_battery),
+        pv_to_grid: curve(&directives.pv_to_grid),
+        battery_to_grid: curve(&directives.battery_to_grid),
+        grid_to_battery: curve(&directives.grid_to_battery),
         soc_floor: directives.soc_floor.get() / 100.0,
         soc_ceiling: directives.soc_ceiling.get() / 100.0,
         energy_step_kwh: DcKwh::new(directives.energy_step_kwh),
         action_step_kw: AcKw::new(directives.action_step_kw),
         terminal,
     }
+}
+
+/// Directives hold the curve as percent pairs; the solver wants fractions. Infallible:
+/// `Directives::apply` and the file loader both reject a curve that would fail here.
+fn curve<I: Quantity, O: Quantity>(path: &PathCurve) -> EfficiencyCurve<I, O> {
+    let points = path
+        .fractions()
+        .into_iter()
+        .map(|(kw, efficiency)| (I::from_f64(kw), efficiency))
+        .collect();
+    EfficiencyCurve::new(points).expect("directives are validated on the way in")
 }
 
 /// The terminal value to solve with before the price cache has measured one.

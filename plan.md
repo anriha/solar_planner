@@ -767,3 +767,44 @@ clippy warnings.
 Still open: nothing deployed. `just deploy` puts it on the Pi; the HA entity
 `number.solar_bridge_buy_price_czk` is orphaned by the rename (delete it and point any dashboard
 at the two new entities).
+
+### Phase 3a fix 5 (2026-11-06, tenth session) — the efficiency curves are editable points
+
+The four path curves were compiled into `device_params()` while the code's own doc comments
+promised they were "tunable from HA, one per knot" — nothing was emitted, so nothing on the HA
+side could fail. HA has no efficiency concept anywhere (2026.11 battery docs describe flow
+sensors only; `components/energy/` has no "efficiency" at all), so the curves have to live on the
+bridge and be edited as data.
+
+Settled shape:
+
+- **A curve is a list of `(power, η)` points, both coordinates editable.** Five slots per path,
+  `pct: 0` disables a slot, active points must ascend by power. `PathCurve` in
+  `src/directives.rs`; the wire exposes each coordinate as its own number directive
+  (`pv_to_battery_p3_pct`), because every HA entity looks up `directives[name]`.
+- **No string/JSON editing.** A text entity was rejected (parsing in the UI), and HA has no
+  list-editor entity; two numbers per slot is the native surface. `entity_category: config` plus
+  a dedicated "Solar Bridge efficiency" device keeps the 40 numbers off the planner page.
+- **Defaults are the measurements, unchanged**: pv→battery 0.5/1.5/3/6/10 kW at
+  87.0/87.0/92.8/94.3/94.7 %; pv→grid 2/10 kW at 97.0/97.6 (one observation + nameplate);
+  battery→grid 0.5/3/6/10.24 at 93.9/93.9/96.0/96.9; grid→battery 1/9.472 at 95 (unmeasured).
+- **The bridge is the authority**: 50–100 % per point (0 disables; below 50 is a fraction typed
+  into a percent field), power in (0, 30] kW, strictly ascending among active slots, at least one
+  active point; a rejected edit leaves the curve untouched. `EfficiencyCurve::flat` survives as
+  test scaffolding only.
+- **Wire**: `Directives` keeps the curves nested in `directives.json`; `wire_json()` flattens them
+  for `hello`/`state`/`cmd_ack`/`GET /directives`. A test pins wire keys ≡ schema names, so a
+  curve coordinate cannot become invisible to HA.
+- **Acks echo the state**: `hub.py` applies a successful `cmd_ack`'s directives immediately
+  (server value, not optimistic) so a 40-box editor does not wait 5 s per write for the next
+  telemetry frame.
+- `Update::Directives` is boxed — four curves push the enum past clippy's variant-size lint.
+
+Tests: frozen schema 12 → 52 entries; curve edit/ascend/disable/range/no-op/defaults/legacy-file/
+wire-key tests in `tests/directives.rs`; `device_params_carry_the_directives_curves` proves an
+edit reaches the DP. `cargo test` **179 passed / 0 failed / 3 ignored**, `python3 -m unittest`
+**14 passed**, `nix build .#solar-bridge-arm` exit 0, clippy clean on the new code (two
+pre-existing lints remain: `map.rs::as_str` dead code and a `manual_async_fn` in a horizon test).
+
+Still open: nothing deployed. After `just deploy` and an HA reload the 40 entities appear on the
+"Solar Bridge efficiency" device; the plan is unchanged until one of them is edited.

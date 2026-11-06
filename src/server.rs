@@ -15,7 +15,7 @@ use kameo::actor::ActorRef;
 
 use crate::{
     bus::{BusActor, WriteRegister},
-    directives::{ApplyDirective, DirectivesActor, GetCurrent},
+    directives::{ApplyDirective, Directives, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
     state::{GetState, StateActor, Subscribe, Unsubscribe},
 };
@@ -88,7 +88,7 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
         (Ok(state), Ok(directives)) => ServerMsg::Hello {
             meta: (*app.meta).clone(),
             state,
-            directives,
+            directives: directives.wire_json(),
         },
         _ => return, // actor death = process is going down anyway
     };
@@ -157,13 +157,18 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
                         id,
                         ok: true,
                         error: None,
-                        directives,
+                        directives: directives.wire_json(),
                     },
                     Err(kameo::error::SendError::HandlerError(e)) => ServerMsg::CmdAck {
                         id,
                         ok: false,
                         error: Some(e.to_string()),
-                        directives: app.directives.ask(GetCurrent).await.unwrap_or_default(),
+                        directives: app
+                            .directives
+                            .ask(GetCurrent)
+                            .await
+                            .map(|d| d.wire_json())
+                            .unwrap_or_else(|_| Directives::default().wire_json()),
                     },
                     Err(_) => ServerMsg::Error {
                         message: "directives actor unavailable".into(),
@@ -216,7 +221,7 @@ async fn meta_handler(State(app): State<AppState>) -> Response {
 
 async fn directives_handler(State(app): State<AppState>) -> Response {
     match app.directives.ask(GetCurrent).await {
-        Ok(d) => Json(d).into_response(),
+        Ok(d) => Json(d.wire_json()).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "directives actor unavailable",

@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use kameo::actor::{ActorRef, Spawn};
 use serde_json::{Value as Json, json};
 use solar_controller::bus::{BusActor, LinkConfig};
-use solar_controller::directives::DirectivesActor;
+use solar_controller::directives::{Directives, DirectivesActor};
 use solar_controller::map::{EMBEDDED_MAP, load_from_str};
 use solar_controller::server::{AppState, serve};
 use solar_controller::state::{StateActor, Update};
@@ -154,12 +154,16 @@ async fn persisted_directives_survive_the_first_telemetry_frame() {
         "action_step_kw": 1.2
     });
     let (port, _dir, state) = setup_with(Some(persisted.clone())).await;
+    // The file has no efficiency curves: they must load as the measured defaults, and the
+    // wire carries the flat map (policy scalars + every curve coordinate).
+    let loaded: Directives = serde_json::from_value(persisted.clone()).unwrap();
+    let wire = loaded.wire_json();
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
         .await
         .unwrap();
     let hello = recv_json(&mut ws).await;
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["directives"], persisted);
+    assert_eq!(hello["directives"], wire);
 
     // A pong proves the subscription is registered: the server subscribes before it
     // reads the next client frame, so anything after it is broadcast to us.
@@ -180,7 +184,7 @@ async fn persisted_directives_survive_the_first_telemetry_frame() {
     let frame = recv_json(&mut ws).await;
     assert_eq!(frame["type"], "state");
     assert_eq!(
-        frame["directives"], persisted,
+        frame["directives"], wire,
         "the state stream reset the persisted directives to the defaults"
     );
 }

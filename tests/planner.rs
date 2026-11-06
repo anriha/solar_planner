@@ -261,3 +261,19 @@ async fn a_forecast_past_the_published_prices_still_produces_a_plan() {
     let payload = state.ask(GetState).await.expect("state actor alive");
     assert!(payload.plan.is_some(), "the plan is published");
 }
+
+/// The DP must price the directives' curves, not a hardcoded copy: a point edited from HA
+/// has to reach `device_params` without a rebuild.
+#[test]
+fn device_params_carry_the_directives_curves() {
+    use solar_controller::planner::actor::{bootstrap_terminal, device_params};
+    use solar_controller::units::DcKw;
+
+    let mut directives = Directives::default();
+    directives
+        .apply("pv_to_battery_p1_pct", serde_json::json!(60.0))
+        .unwrap();
+    let params = device_params(&directives, bootstrap_terminal());
+    assert!((params.pv_to_battery.at(DcKw::new(0.5)) - 0.60).abs() < 1e-12);
+    assert!((params.pv_to_battery.at(DcKw::new(6.0)) - 0.943).abs() < 1e-12);
+}

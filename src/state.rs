@@ -28,7 +28,9 @@ pub struct StateActor {
 pub enum Update {
     Good(Snapshot),
     Down,
-    Directives(Directives),
+    /// Boxed: the curve fields make `Directives` ~400 bytes, and every other variant here
+    /// is a pointer or a small option — the plan/telemetry messages must not carry it.
+    Directives(Box<Directives>),
     /// The planner's latest output. `None` withdraws it (planner off, no horizon).
     Plan(Option<Plan>),
 }
@@ -134,8 +136,8 @@ impl Message<Update> for StateActor {
                 }
             }
             Update::Directives(d) => {
-                if d != self.directives {
-                    self.directives = d;
+                if *d != self.directives {
+                    self.directives = *d;
                     self.broadcast();
                 }
             }

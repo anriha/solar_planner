@@ -203,6 +203,13 @@ class BridgeHub:
                 on_state(self._state)
             case "cmd_ack":
                 self._resolve_ack(data)
+                # The ack carries the bridge's post-apply directive state. Echoing it makes
+                # a successful edit visible immediately instead of after the next 5 s frame
+                # — the curve editor is 40 numbers and waits between writes otherwise. The
+                # value is still the server's, never a locally assumed one.
+                if data.get("ok") and data.get("directives") and self._state is not None:
+                    self._state = replace(self._state, directives=data["directives"])
+                    on_state(self._state)
             case "write_ack":
                 self._resolve_ack(data)
             case "error":

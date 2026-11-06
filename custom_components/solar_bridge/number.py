@@ -48,8 +48,12 @@ class DirectiveNumber(DirectiveEntity, NumberEntity):
         self._attr_native_step = float(spec.get("step") or 1.0)
         if unit := spec.get("unit"):
             self._attr_native_unit_of_measurement = unit
-        # Negative ranges (price ± CZK/kWh) are unusable as sliders in the UI.
-        self._attr_mode = NumberMode.BOX if spec["min"] < 0 else NumberMode.SLIDER
+        # `mode` is the bridge's hint: curve coordinates are boxes (a slider cannot hit
+        # 10.24 kW), prices with negative ranges are boxes too, everything else is a slider.
+        if mode := spec.get("mode"):
+            self._attr_mode = NumberMode(mode)
+        else:
+            self._attr_mode = NumberMode.BOX if spec["min"] < 0 else NumberMode.SLIDER
 
     async def async_set_native_value(self, value: float) -> None:
         await self._hub.async_cmd(self._spec["name"], value)

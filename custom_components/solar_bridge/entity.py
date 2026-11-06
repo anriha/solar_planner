@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -34,6 +35,22 @@ def planner_device(serial: str) -> DeviceInfo:
     )
 
 
+def efficiency_device(serial: str) -> DeviceInfo:
+    """Conversion curves: plant measurements, not policy — their own page."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{serial}-efficiency")},
+        name="Solar Bridge efficiency",
+        via_device=(DOMAIN, serial),
+    )
+
+
+def directive_device(spec: dict[str, Any], serial: str) -> DeviceInfo:
+    """`meta.directives[].group` decides where a directive lives."""
+    if spec.get("group") == "efficiency":
+        return efficiency_device(serial)
+    return planner_device(serial)
+
+
 class DirectiveEntity(CoordinatorEntity[DataUpdateCoordinator[SolarBridgeState]]):
     """Base for entities driven by bridge directive state.
 
@@ -54,8 +71,10 @@ class DirectiveEntity(CoordinatorEntity[DataUpdateCoordinator[SolarBridgeState]]
         self._hub = data.hub
         self._spec = spec
         self._attr_unique_id = f"{data.serial}_directive_{spec['name']}"
-        self._attr_name = spec["name"].replace("_", " ")
-        self._attr_device_info = planner_device(data.serial)
+        self._attr_name = spec.get("label") or spec["name"].replace("_", " ")
+        self._attr_device_info = directive_device(spec, data.serial)
+        if spec.get("category") == "config":
+            self._attr_entity_category = EntityCategory.CONFIG
 
 
 class ControlEntity(CoordinatorEntity[DataUpdateCoordinator[SolarBridgeState]]):
