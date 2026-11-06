@@ -125,11 +125,13 @@ pub fn actuator_params(directives: &Directives) -> ActuatorParams {
 }
 
 /// The horizon's slice of policy: what selling nets, what buying costs, what the plant
-/// draws on its own.
+/// draws on its own. The buy side is spot + the two charges (2026-11-06); there is no flat
+/// tariff any more, so nothing here may collapse back into a single price.
 pub fn horizon_params(directives: &Directives) -> HorizonParams {
     HorizonParams {
         sell_fee: CzkPerKwh::new(directives.sell_fee_czk.get()),
-        buy_price: CzkPerKwh::new(directives.buy_price_czk.get()),
+        buy_distribution: CzkPerKwh::new(directives.buy_distribution_czk.get()),
+        buy_seller_fee: CzkPerKwh::new(directives.buy_seller_fee_czk.get()),
         load_kw: AcKw::new(PLANT_LOAD_KW),
         forecast_calibration: directives.forecast_calibration,
     }

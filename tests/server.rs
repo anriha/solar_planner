@@ -2,23 +2,37 @@
 //! automated): hello + stream, ping/pong, cmd -> ack + broadcast push,
 //! persistence, auth rejection.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use kameo::actor::Spawn;
+use kameo::actor::{ActorRef, Spawn};
 use serde_json::{Value as Json, json};
 use solar_controller::bus::{BusActor, LinkConfig};
 use solar_controller::directives::DirectivesActor;
 use solar_controller::map::{EMBEDDED_MAP, load_from_str};
 use solar_controller::server::{AppState, serve};
-use solar_controller::state::StateActor;
+use solar_controller::state::{StateActor, Update};
+use solar_controller::telemetry::Snapshot;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn setup() -> (u16, tempfile::TempDir) {
+    let (port, dir, _state) = setup_with(None).await;
+    (port, dir)
+}
+
+/// Like [`setup`], but seeds `directives.json` first — the state a restarted bridge
+/// finds — and hands back the state actor so a test can push a telemetry frame.
+async fn setup_with(initial: Option<Json>) -> (u16, tempfile::TempDir, ActorRef<StateActor>) {
     let dir = tempfile::tempdir().unwrap();
+    if let Some(directives) = &initial {
+        std::fs::write(
+            dir.path().join("directives.json"),
+            serde_json::to_vec_pretty(directives).unwrap(),
+        )
+        .unwrap();
+    }
     let map = load_from_str(EMBEDDED_MAP).unwrap();
 
     let state = StateActor::spawn(StateActor::default());
@@ -38,7 +52,7 @@ async fn setup() -> (u16, tempfile::TempDir) {
     ));
     let app = AppState {
         meta,
-        state,
+        state: state.clone(),
         directives,
         bus,
         token: "test-token".into(),
@@ -47,7 +61,7 @@ async fn setup() -> (u16, tempfile::TempDir) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(serve(listener, app));
-    (port, dir)
+    (port, dir, state)
 }
 
 async fn recv_json(ws: &mut Ws) -> Json {
@@ -114,6 +128,61 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
     .unwrap();
     assert_eq!(persisted["disarm"], true);
     assert_eq!(persisted["version"], 1);
+}
+
+/// Regression (found live 2026-11-06): the directives loaded from `directives.json` went
+/// into the `DirectivesActor` only; `StateActor` kept `Directives::default()`. So `hello`
+/// carried the persisted file (version 4) and the *first telemetry frame* after it carried
+/// the compile-time defaults (version 0) — HA showed a plant policy the bridge was not
+/// using, and a restart looked like every setting had been lost. The state stream must
+/// carry the loaded file, not the defaults.
+#[tokio::test]
+async fn persisted_directives_survive_the_first_telemetry_frame() {
+    let persisted = json!({
+        "version": 4,
+        "planner_enabled": true,
+        "actuator_enabled": true,
+        "disarm": false,
+        "soc_floor": 30.0,
+        "soc_ceiling": 70.0,
+        "max_power_kw": 9.0,
+        "buy_distribution_czk": 2.4,
+        "buy_seller_fee_czk": 0.35,
+        "sell_fee_czk": 0.75,
+        "forecast_calibration": 1.1,
+        "energy_step_kwh": 0.32,
+        "action_step_kw": 1.2
+    });
+    let (port, _dir, state) = setup_with(Some(persisted.clone())).await;
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
+        .await
+        .unwrap();
+    let hello = recv_json(&mut ws).await;
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["directives"], persisted);
+
+    // A pong proves the subscription is registered: the server subscribes before it
+    // reads the next client frame, so anything after it is broadcast to us.
+    ws.send(Message::text(json!({"type": "ping"}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(recv_json(&mut ws).await["type"], "pong");
+
+    // One telemetry frame is all it took to wipe the values off the HA screen.
+    state
+        .ask(Update::Good(Snapshot {
+            link_ok: true,
+            ts: 42,
+            values: std::collections::BTreeMap::new(),
+        }))
+        .await
+        .unwrap();
+    let frame = recv_json(&mut ws).await;
+    assert_eq!(frame["type"], "state");
+    assert_eq!(
+        frame["directives"], persisted,
+        "the state stream reset the persisted directives to the defaults"
+    );
 }
 
 #[tokio::test]

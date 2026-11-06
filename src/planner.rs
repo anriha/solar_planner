@@ -62,7 +62,9 @@ pub struct Slot {
     pub mtu: Mtu,
     /// Net price received per kWh exported (spot − sell fee).
     pub price_sell: CzkPerKwh,
-    /// All-in price paid per kWh imported (single-rate household tariff, tunable).
+    /// Price paid per kWh imported: the spot price plus the configured distribution and
+    /// seller charges (all in CZK/kWh, VAT included). Set by `horizon::assemble`, never a
+    /// constant — the plant is on spot pricing both ways since 2026-11-06.
     pub price_buy: CzkPerKwh,
     /// Forecast PV production on the DC side during this MTU — array output, before any
     /// conversion. Every AC-side quantity is produced through a [`Params`] path curve.

@@ -324,8 +324,10 @@ moved 14.8 / 16.3 / 16.8 kWh on Oct 31–Nov 2). The planner goes live immediate
    skip null items rather than reading them as 0. ČNB `api.cnb.cz/cnbapi/exrates/daily` *ignores*
    `?currency=EUR` and returns all 30 rows: filter `currencyCode == "EUR"` and divide `rate` by
    `amount` (24.34 CZK/EUR on 2026-11-03).
-2. **Tariff** — sell = `spot − 0.50` CZK/kWh; buy = flat **5.00 CZK/kWh** (single-rate household,
-   all-in) as a tunable placeholder.
+2. **Tariff** — spot both ways (corrected 2026-11-06; the flat tariff was wrong — see the
+   spot-buy section at the end): sell = `spot − sell_fee`; buy = `spot + distribution + seller
+   fee`. Settled values `sell_fee 0.5`, `distribution 2.515`, `seller fee 0.3` (`300 CZK/MWh`),
+   all CZK/kWh, **VAT included** — the ceník's numbers are already final, so no VAT knob exists.
 3. **Method** — **dynamic programming** over a discretized battery-energy grid (`V_t(E)`,
    forward argmax walk, marginal value by finite difference = the explanation). Chosen because the
    actuator is window+setpoint shaped, `η(P)` must sit inside the objective (slow-drain vs burst),
@@ -350,7 +352,8 @@ moved 14.8 / 16.3 / 16.8 kWh on Oct 31–Nov 2). The planner goes live immediate
    geometry); everything tunable lives in **`Directives`** (persisted, validated, reject-never-clamp
    like the write path). `soc_target_hold` and `price_override` are **deleted**; `planner_enabled`
    and `force_mode` stay. New fields: `soc_floor 0.20`, `soc_ceiling 0.80`, `max_power_kw 12`,
-   `buy_price_czk 5.0`, `sell_fee_czk 0.5`, `min_sell_price 0`, `forecast_calibration 1.0`,
+   `buy_distribution_czk 2.515`, `buy_seller_fee_czk 0.3`, `sell_fee_czk 0.5`, `min_sell_price 0`,
+   `forecast_calibration 1.0`,
    `battery_charge`/`battery_discharge`/`inverter` efficiency curves (points),
    `energy_step_kwh 0.32`, `action_step_kw 1.2`.
    Prices are never set from HA — the authoritative source is the Pi's own feed.
@@ -445,8 +448,8 @@ What exists now:
   withdraws it when the planner is disabled. (**Superseded 2026-11-06** — the plan is its own
   frame; see the decisions log and the fourth-session state.)
 - `Directives` — the Phase 3a tuning surface (soc_floor/ceiling with cross-field validation,
-  max_power_kw, buy_price_czk, sell_fee_czk, forecast_calibration, energy_step_kwh,
-  action_step_kw). `soc_target_hold` and `price_override` are deleted.
+  max_power_kw, buy_distribution_czk, buy_seller_fee_czk, sell_fee_czk, forecast_calibration,
+  energy_step_kwh, action_step_kw). `soc_target_hold` and `price_override` are deleted.
 - `telemetry.rs` — `PlanningSignals` (battery_soc, battery_power), loud on missing/renamed, with
   a coupling test through the real map.
 
@@ -671,3 +674,96 @@ clippy warnings, `nix build .#solar-bridge-arm` exit 0.
 Still open: the first **live write** must watch `battery_power` during a hold that exports — it
 must sit near 0 while the export counters move. If the pack moves, the 0 W slot cap is not
 enough and the hold must go back to disarmed mode with a different overflow mechanism.
+
+### Phase 3a fix 3 (2026-11-06, eighth session) — the settings were saved, the screen was not
+
+Reported as "the settings configured in HA should be persisted and currently aren't". They were
+persisted: the Pi's `directives.json` held `version 4` and `buy_price_czk 7.649` (set at 13:18)
+straight through the 13:33 restart. The loss was on the wire.
+
+Probed the live bridge read-only (no cmd): `hello.directives` carried the file
+(`buy_price_czk 7.649`, `version 4`); the first `state` frame, one poll later, carried
+`buy_price_czk 5.0`, `version 0` — `Directives::default()`. `DirectivesActor::new` loaded the
+file into the actor, but `StateActor` was spawned with `Directives::default()` and only heard
+about directives when a command changed them. Every telemetry broadcast — every 5 s, and after
+every HA or bridge restart — therefore overwrote the persisted policy on screen with the
+compile-time defaults, while the planner kept using the file. The UI was describing a plant the
+bridge was not running; `actuator_enabled` persisted true displayed false, which reads as
+"disarmed" while the planner writes.
+
+Fix: `DirectivesActor::new` seeds the state actor with the value it loaded (sync `try_send`), so
+the invariant lives in the constructor instead of in each entry point. Regression test
+`tests/server.rs::persisted_directives_survive_the_first_telemetry_frame` seeds a
+`directives.json`, connects, checks the hello, pushes one telemetry frame and requires the state
+frame to match the file — it failed with the defaults before the fix and passes after.
+
+`cargo test` **167 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14 passed**, no new
+clippy warnings, `nix build .#solar-bridge-arm` exit 0.
+
+Still open: nothing deployed from this session. The Pi runs the pre-fix binary, so HA will keep
+showing defaults after every restart until `just deploy`.
+
+### Phase 3a fix 4 (2026-11-06, ninth session) — the buy price was the wrong model
+
+Reported as "the buy price is actually wrong. I thought we were using regular tariff but no."
+The flat `buy_price_czk` (5.0 default, 7.649 hand-set on the Pi) modelled a fixed household
+tariff. The plant is on **spot pricing both ways**: what it pays is the day-ahead price plus the
+regulated per-kWh charges plus the supplier's fee, so the buy side moves MTU by MTU and can go
+negative on a deep negative spot.
+
+The rule, all CZK/kWh, **VAT included** (the ceník's numbers are final; there is deliberately no
+VAT factor to double-count):
+
+```
+price_buy = spot + buy_distribution_czk + buy_seller_fee_czk
+          = spot + 2.515 + 0.3
+price_sell = spot − sell_fee_czk            (0.5, unchanged — its own fee, not the buy one)
+```
+
+Settled values: distribution **2.515** CZK/kWh, seller fee **0.3** CZK/kWh (the ceník's
+**300 CZK/MWh**, stored in the unit the ceník speaks in), sell fee **0.5** CZK/kWh. Both buy
+charges are directives, so the distributor's and supplier's price lists are tunable from HA
+without a rebuild. `buy_price_czk` is **deleted**, not defaulted: `load()` drops it from an
+older `directives.json` the same way it already drops `force_mode`, and the two new fields
+carry `serde(default)` because the Pi's live file has neither.
+
+Where the change lands — one expression per concern, which is why it is small:
+
+- `horizon::assemble` computes `price_buy` per slot from the same `price.czk_per_kwh()` it
+  already uses for the sell side. `Slot` stays a single price per MTU; the solver never learns
+  the charges exist.
+- `HorizonParams` carries `buy_distribution` + `buy_seller_fee` instead of `buy_price`;
+  `actor::horizon_params` maps the two directives through.
+- Nothing else: `Slot` is not on the wire (`Plan` is), the DP reads `price_buy` unchanged, and
+  `plan_view.py` derives its displayed CZK/kWh from `net/ac` — so the HA plan entities became
+  correct without touching Python.
+
+Two consequences worth recording:
+
+1. **Arbitrage is now about the intraday spread, not the absolute price.** The buy−sell gap is a
+   fixed **3.315 CZK/kWh** (2.515 + 0.3 + 0.5), so charging from the grid to sell later needs the
+   peak-to-trough spread above ~3.6 CZK/kWh (round-trip η ≈ 0.92) rather than "spot > ~5.9".
+   Flat days stop importing; volatile ones import more. Buying and immediately re-selling is
+   impossible by construction, which is correct.
+2. **`TerminalValue` stays sell-side** (`spot − sell_fee`, median of daily maxima). The plant is
+   offsite: a stored kWh at the end of the horizon can only leave through the meter, so the
+   avoided buy price is not an alternative use of it. Left as is, and the bootstrap 7.974 is
+   still only a level until the first fetch measures one.
+
+Also added: the `meta.directives` number spec gained an optional **`step`** (additive; the HA
+side already reads `spec.get("step") or 1.0`). Without it every entity inherits step 1.0, and a
+1.0-step slider cannot reach 2.515 or 0.3 at all — the two new fields would have shipped
+unreachable from the UI. The three CZK/kWh entities are now `step: 0.001`.
+
+Tests: `buy_price_tracks_the_spot_instead_of_being_a_constant_tariff` and
+`a_negative_spot_can_make_buying_cheaper_than_nothing` pin the arithmetic in `horizon.rs`;
+`the_retired_flat_tariff_is_dropped_and_the_spot_charges_default` pins the file migration
+(the Pi's `buy_price_czk 7.649` must load, vanish, and not reappear on the next save). The
+frozen-schema test carries the two new names and the `step` key.
+
+`cargo test` **170 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14 passed**, no new
+clippy warnings.
+
+Still open: nothing deployed. `just deploy` puts it on the Pi; the HA entity
+`number.solar_bridge_buy_price_czk` is orphaned by the rename (delete it and point any dashboard
+at the two new entities).

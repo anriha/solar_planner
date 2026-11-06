@@ -9,8 +9,8 @@
 //!   Nothing assumes 24 h, 96 MTUs or a fixed UTC offset: a DST day is 92 or 100 MTUs.
 //! * Prices and PV are joined on [`Mtu::start`], never by position — the two sources are
 //!   fetched independently and may be trimmed differently.
-//! * `price_sell = spot − sell_fee`, `price_buy = buy_price`; `load_kw` is the plant's own
-//!   draw (~0.09 kW), not the house.
+//! * `price_sell = spot − sell_fee`, `price_buy = spot + distribution + seller fee`; `load_kw`
+//!   is the plant's own draw (~0.09 kW), not the house.
 //!
 //! # Refresh policy (2026-11-06, supersedes 2026-11-05)
 //!
@@ -70,8 +70,13 @@ pub const RETRY_MAX_SECS: i64 = 1800;
 pub struct HorizonParams {
     /// Deducted from the spot price: `price_sell = spot − sell_fee`.
     pub sell_fee: CzkPerKwh,
-    /// The all-in household tariff paid per kWh imported.
-    pub buy_price: CzkPerKwh,
+    /// Added to the spot price on every imported kWh: the regulated per-kWh charges
+    /// (distribution and the rest), CZK/kWh, VAT included. A directive, because the
+    /// distributor's price list changes annually.
+    pub buy_distribution: CzkPerKwh,
+    /// Added to the spot price on every imported kWh: the supplier's own fee, CZK/kWh,
+    /// VAT included. Its own directive, for the same reason.
+    pub buy_seller_fee: CzkPerKwh,
     /// The plant's own AC draw (inverter + Pi), constant across MTUs.
     pub load_kw: AcKw,
     /// Measured ÷ forecast, applied to every forecast kWh. A directive, because the
@@ -132,7 +137,14 @@ pub fn assemble(
         .map(|(mtu_start, price)| Slot {
             mtu: price.mtu,
             price_sell: CzkPerKwh::new(price.czk_per_kwh().get() - params.sell_fee.get()),
-            price_buy: params.buy_price,
+            // Buy pays the same spot as sell, plus the two charges — they are the whole
+            // difference between the sides. The charges are constant across MTUs; folding
+            // them in here keeps the solver on one price per direction.
+            price_buy: CzkPerKwh::new(
+                price.czk_per_kwh().get()
+                    + params.buy_distribution.get()
+                    + params.buy_seller_fee.get(),
+            ),
             pv_kw: forecast
                 .get(mtu_start)
                 .map(|point| point.dc_kwh / price.mtu.hours * params.forecast_calibration)
@@ -397,7 +409,8 @@ mod tests {
     fn params() -> HorizonParams {
         HorizonParams {
             sell_fee: CzkPerKwh::new(0.5),
-            buy_price: CzkPerKwh::new(5.0),
+            buy_distribution: CzkPerKwh::new(2.5),
+            buy_seller_fee: CzkPerKwh::new(0.3),
             load_kw: AcKw::new(0.09),
             forecast_calibration: 1.0,
         }
@@ -515,8 +528,9 @@ mod tests {
     }
 
     #[test]
-    fn sell_price_is_spot_minus_the_fee() {
-        // 250 EUR/MWh at 25.0 CZK/EUR is 6.25 CZK/kWh; the 0.50 fee leaves 5.75.
+    fn sell_is_spot_minus_the_fee_and_buy_is_spot_plus_the_charges() {
+        // 250 EUR/MWh at 25.0 CZK/EUR is 6.25 CZK/kWh; the 0.50 sell fee leaves 5.75, and
+        // the 2.50 distribution + 0.30 seller fee put the buy side at 9.05.
         let prices = vec![price(T0, 250.0)];
 
         let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
@@ -527,8 +541,51 @@ mod tests {
             "spot minus fee, got {}",
             slot.price_sell
         );
-        assert!((slot.price_buy.get() - 5.0).abs() < 1e-9, "the tariff is not discounted");
+        assert!(
+            (slot.price_buy.get() - 9.05).abs() < 1e-9,
+            "spot plus distribution and seller fee, got {}",
+            slot.price_buy
+        );
         assert!((slot.load_kw.get() - 0.09).abs() < 1e-9);
+    }
+
+    #[test]
+    fn buy_price_tracks_the_spot_instead_of_being_a_constant_tariff() {
+        // The 2026-11-06 change: the plant is on spot pricing both ways, so two MTUs at
+        // different spot prices must differ by exactly that much on both sides.
+        let prices = vec![price(T0, 100.0), price(T0 + 900, 400.0)];
+
+        let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
+
+        let (first, second) = (&horizon[0], &horizon[1]);
+        assert!(
+            ((second.price_buy.get() - first.price_buy.get()) - 7.5).abs() < 1e-9,
+            "300 EUR/MWh at 25 CZK/EUR is 7.5 CZK/kWh of spread, got {}",
+            second.price_buy.get() - first.price_buy.get()
+        );
+        assert!(
+            ((second.price_sell.get() - first.price_sell.get()) - 7.5).abs() < 1e-9,
+            "the sell side tracks the same spot"
+        );
+    }
+
+    #[test]
+    fn a_negative_spot_can_make_buying_cheaper_than_nothing() {
+        // Distribution and the seller fee are unavoidable, so a negative spot only turns
+        // the buy price negative once it is deeper than their sum (2.8 in `params`).
+        let prices = vec![price(T0, -300.0), price(T0 + 900, -100.0)];
+        let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
+
+        assert!(
+            (horizon[0].price_buy.get() + 4.7).abs() < 1e-9,
+            "−7.5 spot + 2.8 in charges is −4.7, got {}",
+            horizon[0].price_buy.get()
+        );
+        assert!(
+            horizon[1].price_buy.get() > 0.0,
+            "−2.5 spot + 2.8 is still a positive price, got {}",
+            horizon[1].price_buy.get()
+        );
     }
 
     // --- the actor: refresh is its own business, build never fetches -------------------

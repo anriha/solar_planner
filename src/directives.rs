@@ -76,9 +76,20 @@ pub struct Directives {
     pub soc_ceiling: Percent,
     /// The inverter's single AC interface rating, kW.
     pub max_power_kw: f64,
-    /// All-in household tariff paid per kWh imported, CZK/kWh.
-    pub buy_price_czk: Price,
-    /// Deducted from the spot price, CZK/kWh.
+    /// Distribution and the other regulated per-kWh charges on imported energy, CZK/kWh,
+    /// VAT included. The buy side is `spot + buy_distribution_czk + buy_seller_fee_czk`
+    /// (2026-11-06): the plant is on spot pricing both ways, so no flat tariff exists.
+    ///
+    /// `serde(default)` because a `directives.json` written before that model lacks the
+    /// field — its retired `buy_price_czk` is dropped on load — and must still boot.
+    #[serde(default = "default_buy_distribution")]
+    pub buy_distribution_czk: Price,
+    /// The supplier's own fee on imported energy, CZK/kWh, VAT included. 0.3 is the
+    /// settled 300 CZK/MWh from the ceník.
+    #[serde(default = "default_buy_seller_fee")]
+    pub buy_seller_fee_czk: Price,
+    /// Deducted from the spot price, CZK/kWh. **Its own fee**, not the buy-side one: what
+    /// the trader keeps on an export, separate from what it charges on an import.
     pub sell_fee_czk: Price,
     /// Measured ÷ forecast, applied to every forecast kWh.
     pub forecast_calibration: f64,
@@ -86,6 +97,15 @@ pub struct Directives {
     pub energy_step_kwh: f64,
     /// Action-grid resolution the DP chooses from, kW.
     pub action_step_kw: f64,
+}
+
+/// The settled per-kWh buy charges, as `serde` defaults for a legacy file.
+fn default_buy_distribution() -> Price {
+    Price::try_from(2.515).expect("static bound")
+}
+
+fn default_buy_seller_fee() -> Price {
+    Price::try_from(0.3).expect("static bound")
 }
 
 impl Default for Directives {
@@ -100,7 +120,8 @@ impl Default for Directives {
             soc_floor: percent(20.0),
             soc_ceiling: percent(80.0),
             max_power_kw: 12.0,
-            buy_price_czk: price(5.0),
+            buy_distribution_czk: default_buy_distribution(),
+            buy_seller_fee_czk: default_buy_seller_fee(),
             sell_fee_czk: price(0.5),
             forecast_calibration: 1.0,
             energy_step_kwh: 0.32,
@@ -207,7 +228,20 @@ impl Directives {
             "max_power_kw" => {
                 set(&mut self.max_power_kw, number_in(&value, name, 0.5..=30.0)?)
             }
-            "buy_price_czk" => set(&mut self.buy_price_czk, price(&value, name)?),
+            "buy_distribution_czk" => {
+                let new = price(&value, name)?;
+                if new.get() < 0.0 {
+                    return Err(invalid(name, "expected a non-negative charge"));
+                }
+                set(&mut self.buy_distribution_czk, new)
+            }
+            "buy_seller_fee_czk" => {
+                let new = price(&value, name)?;
+                if new.get() < 0.0 {
+                    return Err(invalid(name, "expected a non-negative charge"));
+                }
+                set(&mut self.buy_seller_fee_czk, new)
+            }
             "sell_fee_czk" => {
                 let new = price(&value, name)?;
                 if new.get() < 0.0 {
@@ -241,11 +275,15 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Directives>> {
         Ok(raw) => {
             let mut value: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| anyhow::anyhow!("directives file {path:?}: {e}"))?;
-            // `force_mode` was deleted 2026-11-06. A file written by an older binary still
-            // carries it, and `deny_unknown_fields` would turn that into a startup failure;
-            // drop the retired key instead. Every other unknown field is still an error.
+            // `force_mode` was deleted 2026-11-06, and `buy_price_czk` retired the same day
+            // with the spot-buy model (buy is spot + the two charges now). A file written by
+            // an older binary still carries them, and `deny_unknown_fields` would turn that
+            // into a startup failure; drop the retired keys instead. Every other unknown
+            // field is still an error.
             if let Some(object) = value.as_object_mut() {
-                object.remove("force_mode");
+                for retired in ["force_mode", "buy_price_czk"] {
+                    object.remove(retired);
+                }
             }
             Ok(Some(serde_json::from_value(value).map_err(|e| {
                 anyhow::anyhow!("directives file {path:?}: {e}")
@@ -273,8 +311,21 @@ pub struct DirectivesActor {
 
 impl DirectivesActor {
     /// Loads persisted state; errors on a corrupt file (fail startup loudly).
+    ///
+    /// The loaded value is pushed into the state actor here rather than by the caller,
+    /// because every telemetry broadcast carries `StateActor`'s copy and a copy left at
+    /// `Directives::default()` silently rewrites the persisted policy on screen. Found
+    /// live 2026-11-06: `hello` carried the file's `version 4` (with a hand-set buy price
+    /// that was retired the same day, when buying became spot + charges), the first `state`
+    /// frame 5 s later carried `version 0` — `Directives::default()` — and HA showed the
+    /// defaults until the next command. Seeding at construction is the one place that cannot
+    /// be forgotten by a new entry point.
     pub fn new(path: PathBuf, state: ActorRef<StateActor>) -> anyhow::Result<Self> {
         let current = load(&path)?.unwrap_or_default();
+        state
+            .tell(Update::Directives(current.clone()))
+            .try_send()
+            .map_err(|e| anyhow::anyhow!("seeding state with directives: {e}"))?;
         Ok(Self {
             path,
             current,
@@ -338,15 +389,19 @@ impl Message<GetCurrent> for DirectivesActor {
 //   {"name":"soc_floor","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
 //   {"name":"soc_ceiling","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
 //   {"name":"max_power_kw","type":"number","min":0.5,"max":30.0,"nullable":false,"unit":"kW"}
-//   {"name":"buy_price_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"}
-//   {"name":"sell_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"}
+//   {"name":"buy_distribution_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
+//   {"name":"buy_seller_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
+//   {"name":"sell_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
 //   {"name":"forecast_calibration","type":"number","min":0.1,"max":3.0,"nullable":false}
 //   {"name":"energy_step_kwh","type":"number","min":0.05,"max":5.0,"nullable":false,"unit":"kWh"}
 //   {"name":"action_step_kw","type":"number","min":0.1,"max":5.0,"nullable":false,"unit":"kW"}
 //
-// min/max mirror the Percent/Price newtype bounds; nullable marks Option fields.
+// min/max mirror the Percent/Price newtype bounds; nullable marks Option fields. `step`
+// was added 2026-11-06 (additive, HA reads it with `.get("step") or 1.0`): a slider whose
+// step is 1.0 cannot reach 2.515 or 0.3 at all, so every sub-unit price needs its own.
 // Ranges here are UX clamps only — Directives::apply() stays the validation
-// authority.
+// authority (it is also where the two buy charges are held to non-negative, which the
+// Price newtype alone would allow negative).
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -361,6 +416,8 @@ enum DirectiveSpec {
         nullable: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         unit: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        step: Option<f64>,
     },
 }
 
@@ -382,6 +439,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 100.0,
             nullable: false,
             unit: Some("%"),
+            step: None,
         },
         DirectiveSpec::Number {
             name: "soc_ceiling",
@@ -389,6 +447,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 100.0,
             nullable: false,
             unit: Some("%"),
+            step: None,
         },
         DirectiveSpec::Number {
             name: "max_power_kw",
@@ -396,13 +455,23 @@ pub fn directive_schema() -> serde_json::Value {
             max: 30.0,
             nullable: false,
             unit: Some("kW"),
+            step: None,
         },
         DirectiveSpec::Number {
-            name: "buy_price_czk",
+            name: "buy_distribution_czk",
             min: 0.0,
             max: 10_000.0,
             nullable: false,
             unit: Some("CZK/kWh"),
+            step: Some(0.001),
+        },
+        DirectiveSpec::Number {
+            name: "buy_seller_fee_czk",
+            min: 0.0,
+            max: 10_000.0,
+            nullable: false,
+            unit: Some("CZK/kWh"),
+            step: Some(0.001),
         },
         DirectiveSpec::Number {
             name: "sell_fee_czk",
@@ -410,6 +479,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 10_000.0,
             nullable: false,
             unit: Some("CZK/kWh"),
+            step: Some(0.001),
         },
         DirectiveSpec::Number {
             name: "forecast_calibration",
@@ -417,6 +487,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 3.0,
             nullable: false,
             unit: None,
+            step: None,
         },
         DirectiveSpec::Number {
             name: "energy_step_kwh",
@@ -424,6 +495,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 5.0,
             nullable: false,
             unit: Some("kWh"),
+            step: None,
         },
         DirectiveSpec::Number {
             name: "action_step_kw",
@@ -431,6 +503,7 @@ pub fn directive_schema() -> serde_json::Value {
             max: 5.0,
             nullable: false,
             unit: Some("kW"),
+            step: None,
         },
     ])
     .expect("static schema always serializes")

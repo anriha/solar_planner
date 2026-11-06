@@ -14,7 +14,8 @@ fn defaults_are_the_phase_3a_tuning() {
     assert_eq!(d.soc_floor, Percent::try_from(20.0).unwrap());
     assert_eq!(d.soc_ceiling, Percent::try_from(80.0).unwrap());
     assert_eq!(d.max_power_kw, 12.0);
-    assert_eq!(d.buy_price_czk, Price::try_from(5.0).unwrap());
+    assert_eq!(d.buy_distribution_czk, Price::try_from(2.515).unwrap());
+    assert_eq!(d.buy_seller_fee_czk, Price::try_from(0.3).unwrap());
     assert_eq!(d.sell_fee_czk, Price::try_from(0.5).unwrap());
     assert_eq!(d.forecast_calibration, 1.0);
     assert_eq!(d.energy_step_kwh, 0.32);
@@ -30,7 +31,8 @@ fn apply_each_directive_and_bump_version() {
     assert!(d.apply("soc_floor", json!(25)).unwrap());
     assert!(d.apply("soc_ceiling", json!(75)).unwrap());
     assert!(d.apply("max_power_kw", json!(10.0)).unwrap());
-    assert!(d.apply("buy_price_czk", json!(4.5)).unwrap());
+    assert!(d.apply("buy_distribution_czk", json!(2.4)).unwrap());
+    assert!(d.apply("buy_seller_fee_czk", json!(0.35)).unwrap());
     assert!(d.apply("sell_fee_czk", json!(0.75)).unwrap());
     assert!(d.apply("forecast_calibration", json!(0.45)).unwrap());
     assert!(d.apply("energy_step_kwh", json!(0.4)).unwrap());
@@ -42,12 +44,13 @@ fn apply_each_directive_and_bump_version() {
     assert_eq!(d.soc_floor.get(), 25.0);
     assert_eq!(d.soc_ceiling.get(), 75.0);
     assert_eq!(d.max_power_kw, 10.0);
-    assert_eq!(d.buy_price_czk.get(), 4.5);
+    assert_eq!(d.buy_distribution_czk.get(), 2.4);
+    assert_eq!(d.buy_seller_fee_czk.get(), 0.35);
     assert_eq!(d.sell_fee_czk.get(), 0.75);
     assert_eq!(d.forecast_calibration, 0.45);
     assert_eq!(d.energy_step_kwh, 0.4);
     assert_eq!(d.action_step_kw, 1.0);
-    assert_eq!(d.version, 11);
+    assert_eq!(d.version, 12);
 }
 
 #[test]
@@ -130,7 +133,10 @@ fn numbers_outside_their_range_are_rejected_not_clamped() {
     for (name, value) in [
         ("max_power_kw", json!(0.1)),
         ("max_power_kw", json!(31.0)),
-        ("buy_price_czk", json!(10_001.0)),
+        ("buy_distribution_czk", json!(10_001.0)),
+        ("buy_distribution_czk", json!(-0.5)),
+        ("buy_seller_fee_czk", json!(10_001.0)),
+        ("buy_seller_fee_czk", json!(-0.5)),
         ("sell_fee_czk", json!(-0.5)),
         ("forecast_calibration", json!(0.05)),
         ("forecast_calibration", json!(4.0)),
@@ -192,6 +198,37 @@ fn a_file_written_before_the_switch_existed_loads_disabled() {
 }
 
 #[test]
+fn the_retired_flat_tariff_is_dropped_and_the_spot_charges_default() {
+    // The Pi's file on 2026-11-06 held a hand-set `buy_price_czk` 7.649 against a flat
+    // tariff that turned out to be the wrong model. That key is gone; the file must load,
+    // the two buy charges must appear at their settled defaults, and the old number must
+    // not survive as a price anywhere.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("directives.json");
+    std::fs::write(
+        &path,
+        r#"{"version":4,"planner_enabled":true,"actuator_enabled":true,"disarm":false,
+            "soc_floor":30.0,"soc_ceiling":70.0,"max_power_kw":9.0,
+            "buy_price_czk":7.649,"sell_fee_czk":0.75,"forecast_calibration":1.1,
+            "energy_step_kwh":0.32,"action_step_kw":1.2}"#,
+    )
+    .unwrap();
+
+    let loaded = load(&path).unwrap().expect("a pre-spot file still loads");
+    assert_eq!(loaded.buy_distribution_czk.get(), 2.515);
+    assert_eq!(loaded.buy_seller_fee_czk.get(), 0.3);
+    assert_eq!(loaded.sell_fee_czk.get(), 0.75, "the sell fee is its own field");
+    assert_eq!(loaded.version, 4, "a migrated load is not an edit");
+    assert!(loaded.actuator_enabled, "the migration preserves the rest");
+
+    // The next save writes the new shape and no retired key.
+    save(&path, &loaded).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("buy_price_czk"), "the retired key is not re-written");
+    assert!(raw.contains("buy_distribution_czk"));
+}
+
+#[test]
 fn other_unknown_fields_are_still_a_loud_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("directives.json");
@@ -203,7 +240,7 @@ fn other_unknown_fields_are_still_a_loud_error() {
             "typo_field":true}"#,
     )
     .unwrap();
-    assert!(load(&path).is_err(), "only force_mode is migrated");
+    assert!(load(&path).is_err(), "only force_mode and buy_price_czk are migrated");
 }
 
 #[test]
@@ -227,8 +264,9 @@ fn directive_schema_matches_frozen_contract() {
             {"type":"number","name":"soc_floor","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
             {"type":"number","name":"soc_ceiling","min":0.0,"max":100.0,"nullable":false,"unit":"%"},
             {"type":"number","name":"max_power_kw","min":0.5,"max":30.0,"nullable":false,"unit":"kW"},
-            {"type":"number","name":"buy_price_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"},
-            {"type":"number","name":"sell_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh"},
+            {"type":"number","name":"buy_distribution_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
+            {"type":"number","name":"buy_seller_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
+            {"type":"number","name":"sell_fee_czk","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001},
             {"type":"number","name":"forecast_calibration","min":0.1,"max":3.0,"nullable":false},
             {"type":"number","name":"energy_step_kwh","min":0.05,"max":5.0,"nullable":false,"unit":"kWh"},
             {"type":"number","name":"action_step_kw","min":0.1,"max":5.0,"nullable":false,"unit":"kW"}]"#,
