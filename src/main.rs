@@ -6,7 +6,7 @@ use kameo::actor::{ActorRef, Spawn};
 use solar_controller::{
     bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick, WriteRegister},
     config,
-    directives::{Directives, DirectivesActor, directive_schema},
+    directives::{Directives, DirectivesActor, GetCurrent, directive_schema},
     map::{EMBEDDED_MAP, RegisterMap, load_from_str},
     planner::{
         actor::{PLANNER_INTERVAL, PlannerActor, drive as planner_drive, horizon_params},
@@ -108,7 +108,25 @@ async fn shutdown_signal() {
 
 /// Best-effort safe state on the way out: the globals only, each with the bus actor's own
 /// timeout, so a dead bus cannot hang the shutdown.
-async fn disarm_on_shutdown(bus: &ActorRef<BusActor>) {
+///
+/// **Only when the actuator was enabled.** A report-only deploy writes nothing, so there is
+/// nothing to undo — and disarming anyway put a plant the planner never touched into
+/// zero-export: on 2026-11-06 a restart with `actuator_enabled = false` wrote
+/// `work_mode = zero_export_load`, `max_sell_power = 0` and `solar_sell = 0` at 13:33:33.
+/// That is a write nobody asked for, from the one component whose promise is "off means the
+/// inverter is untouched". An unreadable directive state still disarms: unknown is not off.
+async fn disarm_on_shutdown(bus: &ActorRef<BusActor>, directives: &ActorRef<DirectivesActor>) {
+    let enabled = match directives.ask(GetCurrent).await {
+        Ok(current) => Some(current.actuator_enabled),
+        Err(error) => {
+            eprintln!("[main] directives unavailable ({error}); disarming anyway");
+            None
+        }
+    };
+    if !actuator::shutdown_disarms(enabled) {
+        eprintln!("[main] actuator disabled; leaving the inverter as it is");
+        return;
+    }
     for target in actuator::shutdown_targets() {
         let _ = bus
             .ask(WriteRegister {
@@ -187,7 +205,7 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
     let app = AppState {
         meta,
         state: state_ref,
-        directives: directives_ref,
+        directives: directives_ref.clone(),
         bus: bus_ref.clone(),
         token: cfg.token,
     };
@@ -196,8 +214,8 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
     tokio::select! {
         result = drive(bus_ref.clone(), interval) => result,
         _ = shutdown_signal() => {
-            eprintln!("[main] shutting down; disarming the actuator");
-            disarm_on_shutdown(&bus_ref).await;
+            eprintln!("[main] shutting down");
+            disarm_on_shutdown(&bus_ref, &directives_ref).await;
             Ok(())
         }
     }

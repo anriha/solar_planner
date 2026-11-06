@@ -78,8 +78,11 @@ class Segment:
     @property
     def description(self) -> str:
         parts = [_duration(self.end - self.start)]
-        if self.kind != "idle" and self.traded_kwh > 0:
-            direction = "sold" if self.kind == "export" else "bought"
+        # A hold can trade too: the surplus the pack could not take still leaves through the
+        # meter, and the money in `net_czk` is real. The direction comes from the metered
+        # energy, not from the action, so "Hold · 3.2 kWh sold" reads correctly.
+        if self.traded_kwh > 0:
+            direction = "bought" if self.ac_kwh < 0 else "sold"
             parts.append(f"{self.traded_kwh:.1f} kWh {direction}")
             if (price := self.price_czk_per_kwh) is not None:
                 parts.append(f"{price:.2f} CZK/kWh")
@@ -199,10 +202,12 @@ def by_day(runs: Iterable[Segment], tz) -> list[dict[str, Any]]:
             day,
             {"date": day, "sell_kwh": 0.0, "buy_kwh": 0.0, "net_czk": 0.0, "segments": 0},
         )
-        if run.kind == "export":
-            bucket["sell_kwh"] += run.traded_kwh
-        elif run.kind == "import":
-            bucket["buy_kwh"] += run.traded_kwh
+        # Classified by what crossed the meter, not by the action: a hold that sells its
+        # surplus is a sale, and its money must land in the same bucket as the kWh.
+        if run.ac_kwh > 0:
+            bucket["sell_kwh"] += run.ac_kwh
+        elif run.ac_kwh < 0:
+            bucket["buy_kwh"] += -run.ac_kwh
         bucket["net_czk"] += run.net_czk
         bucket["segments"] += 1
     return [

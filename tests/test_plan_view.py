@@ -129,6 +129,22 @@ class WordingTest(unittest.TestCase):
         self.assertAlmostEqual(run.traded_kwh, 2.7)
         self.assertEqual(run.summary, "Sell 10.8 kW")
 
+    def test_a_hold_that_sells_its_surplus_still_reads_as_traded_energy(self) -> None:
+        # 2026-11-06: a hold exports the PV the pack cannot take. The action stays "idle"
+        # (nothing happens to the pack), but the run did trade and the sensor must say so.
+        held = step(T0, "idle", 0.0, 4.62, 25.6, "pv_cannot_be_stored")
+        held["ac_kwh"] = 3.4
+        run = plan_view.segments(plan(held))[0]
+
+        self.assertEqual(run.summary, "Hold")
+        self.assertAlmostEqual(run.traded_kwh, 3.4)
+        self.assertIn("3.4 kWh sold", run.description)
+        self.assertAlmostEqual(run.price_czk_per_kwh, 4.62 / 3.4)
+
+        days = plan_view.by_day([run], timezone(timedelta(hours=1)))
+        self.assertAlmostEqual(days[0]["sell_kwh"], 3.4)
+        self.assertAlmostEqual(days[0]["net_czk"], 4.62)
+
     def test_idle_run_is_a_hold_with_no_traded_energy(self) -> None:
         run = plan_view.segments(plan(step(T0, "idle", 0.0, 0.0, 20.0, "idle")))[0]
         self.assertEqual(run.summary, "Hold")

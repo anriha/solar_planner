@@ -207,3 +207,57 @@ async fn a_disabled_planner_withdraws_its_plan() {
     let payload = state.ask(GetState).await.expect("state actor alive");
     assert!(payload.plan.is_none(), "a disabled planner leaves no plan behind");
 }
+
+#[tokio::test]
+async fn a_forecast_past_the_published_prices_still_produces_a_plan() {
+    // The 2026-11-06 production failure, end to end through the real actor: the deployed
+    // planner ran all morning with "PV is forecast for <tomorrow 07:00>, an MTU that has no
+    // published price" and published nothing. forecast.solar answers today and tomorrow;
+    // OTE publishes tomorrow only in the early afternoon. The priced window is the horizon,
+    // so the PV tail is dropped instead of starving the day.
+    let dir = tempfile::tempdir().unwrap();
+    let state = StateActor::spawn(StateActor::default());
+    let directives = DirectivesActor::spawn(
+        DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
+    );
+    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+
+    // Today's prices only, and a forecast that reaches all the way to tomorrow evening.
+    let mut forecast = Vec::new();
+    for k in 0..8 {
+        forecast.push(PvPoint {
+            mtu: Mtu {
+                start: T0 + k as i64 * 900,
+                hours: Hours::new(0.25),
+            },
+            dc_kwh: solar_controller::units::DcKwh::new(0.9),
+        });
+    }
+    for k in 0..8 {
+        forecast.push(PvPoint {
+            mtu: Mtu {
+                start: T0 + 100 * 900 + k * 900,
+                hours: Hours::new(0.25),
+            },
+            dc_kwh: solar_controller::units::DcKwh::new(0.9),
+        });
+    }
+
+    let horizon = HorizonActor::new(
+        FakePrices(window(8, 300.0)),
+        FakePv(forecast),
+        horizon_params(&Directives::default()),
+    );
+    let mut planner = PlannerActor::new(horizon, state.clone(), directives, None);
+
+    let plan = planner.cycle(T0).await.expect("the unpriced tail is not fatal");
+
+    assert_eq!(plan.steps.len(), 8, "the horizon stops at the last published price");
+    assert_eq!(
+        plan.horizon_end,
+        T0 + 8 * 900,
+        "the plan ends with the prices, not with the forecast"
+    );
+    let payload = state.ask(GetState).await.expect("state actor alive");
+    assert!(payload.plan.is_some(), "the plan is published");
+}

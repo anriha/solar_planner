@@ -10,6 +10,7 @@
 
 use std::future::Future;
 
+use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use thiserror::Error;
@@ -42,6 +43,11 @@ pub enum ForecastError {
     Network(String),
     #[error("forecast.solar answered HTTP {0}")]
     Http(u16),
+    /// The free tier's 12-requests-per-hour budget is spent. `retry_at` is the server's own
+    /// `x-ratelimit-retry-at` header in unix seconds when it sent a parseable one; the
+    /// horizon must not attempt again before it, because the next call is guaranteed to 429.
+    #[error("forecast.solar rate limit reached (HTTP 429); retry at {retry_at:?}")]
+    RateLimited { retry_at: Option<i64> },
     #[error("could not parse the forecast response: {0}")]
     Parse(String),
 }
@@ -104,11 +110,17 @@ impl PvSource for ForecastSolar {
                 .await
                 .map_err(|e| ForecastError::Network(e.to_string()))?;
             let status = response.status();
+            // Read before `.text()` consumes the response: the 429 carries the only
+            // authoritative answer to "when may I ask again".
+            let retry_at = retry_at(response.headers());
             let body = response
                 .text()
                 .await
                 .map_err(|e| ForecastError::Network(e.to_string()))?;
 
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(ForecastError::RateLimited { retry_at });
+            }
             if !status.is_success() {
                 return Err(ForecastError::Http(status.as_u16()));
             }
@@ -116,6 +128,19 @@ impl PvSource for ForecastSolar {
             parse_estimate(&body)
         }
     }
+}
+
+/// The `x-ratelimit-retry-at` header as unix seconds.
+///
+/// forecast.solar sends an RFC 3339 stamp with a local offset
+/// (`2026-11-06T13:23:24+01:00`). A missing or unparseable header is `None`, not an error:
+/// the horizon still backs off on its own floor.
+pub fn retry_at(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+    let raw = headers.get("x-ratelimit-retry-at")?.to_str().ok()?;
+    raw.trim()
+        .parse::<Timestamp>()
+        .ok()
+        .map(|stamp| stamp.as_second())
 }
 
 /// Turns `result.watt_hours_period` into quarter-hour MTUs, calibrated.
@@ -234,5 +259,38 @@ mod tests {
     fn a_body_without_a_period_map_is_an_error() {
         let err = parse_estimate(r#"{"result":{}}"#).expect_err("no periods");
         assert!(matches!(err, ForecastError::Parse(_)), "got {err:?}");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+                value.parse().expect("header value"),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn the_retry_time_is_the_servers_own_clock() {
+        // Verbatim from the Pi's 429 on 2026-11-06, which is 12:23:24 UTC.
+        let map = headers(&[("x-ratelimit-retry-at", "2026-11-06T13:23:24+01:00")]);
+
+        assert_eq!(
+            retry_at(&map),
+            Some(1_793_967_804),
+            "a local-offset RFC 3339 stamp is the server's instant, not ours"
+        );
+    }
+
+    #[test]
+    fn an_absent_or_unreadable_retry_time_is_none() {
+        assert_eq!(retry_at(&headers(&[])), None, "no header, no promise");
+        assert_eq!(
+            retry_at(&headers(&[("x-ratelimit-retry-at", "soon")])),
+            None,
+            "an unparseable header must not stop the horizon from backing off"
+        );
     }
 }

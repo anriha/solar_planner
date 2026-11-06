@@ -990,10 +990,19 @@ pub fn next_energy_hours(
 
     // 3. Only the DC the pack refused can go straight to the grid.
     let spill_dc = (spare_dc - pv_dc_charge).max(DcKw::ZERO);
-    let pv_export = params
-        .pv_to_grid
-        .through(spill_dc)
-        .min((demand - pv_to_load).max(AcKw::ZERO));
+    let spill_ac = params.pv_to_grid.through(spill_dc);
+    // The part of it that meets the action's target...
+    let pv_export = spill_ac.min((demand - pv_to_load).max(AcKw::ZERO));
+    // ...and the rest, which has nowhere else to go. A hold or a sell runs the plant with PV
+    // export enabled, so the surplus leaves through the meter: holding the pack is a decision
+    // about the battery, not an instruction to throw the afternoon away (2026-11-06 — a hold
+    // over a full pack used to curtail the whole forecast surplus). A grid-charge block is
+    // the one exception: it runs in a no-export mode, so its surplus really is curtailed and
+    // must not be credited to the plan.
+    let pv_overflow = match action {
+        Action::Import { .. } => AcKw::ZERO,
+        Action::Idle | Action::Export { .. } => (spill_ac - pv_export).max(AcKw::ZERO),
+    };
 
     // A purchase covers what PV left of the load, before the pack is touched at all.
     let uncovered = (demand - pv_to_load - pv_export).max(AcKw::ZERO);
@@ -1021,10 +1030,16 @@ pub fn next_energy_hours(
         .min(room_left);
     let to_pack = pv_charge + grid_charge;
 
-    // What actually crossed the meter: everything delivered minus the plant's own draw.
-    let delivered_ac =
-        pv_to_load + pv_export + params.battery_to_grid.through(from_pack) + from_import;
-    let ac_out = (delivered_ac - slot.load_kw).max(AcKw::ZERO).min(target);
+    // What actually crossed the meter: everything delivered minus the plant's own draw. The
+    // action's target no longer caps it — the overflow is not something the plant chose.
+    let delivered_ac = pv_to_load
+        + pv_export
+        + pv_overflow
+        + params.battery_to_grid.through(from_pack)
+        + from_import;
+    let ac_out = (delivered_ac - slot.load_kw)
+        .max(AcKw::ZERO)
+        .min(params.max_power_kw);
 
     Flow {
         energy_after_kwh: energy_kwh + to_pack * hours - from_pack * hours,
@@ -1462,9 +1477,9 @@ mod tests {
         );
 
         // Idle with PV and no load: the pack takes the surplus only up to its ceiling —
-        // 20.0 kWh in a 25.6 kWh pack leaves 5.6 kWh of headroom, and the rest is lost.
+        // 20.0 kWh in a 25.6 kWh pack leaves 5.6 kWh of headroom — and the rest goes out
+        // through the meter. A hold is a decision about the pack, never about the sun.
         let flow = next_energy(DcKwh::new(20.0), &slot(10.0, 0.0), Action::Idle, &lossy);
-        assert!(flow.ac_out_kwh.abs().get() < 1e-9);
         assert!(
             ((flow.energy_after_kwh - DcKwh::new(20.0)) - DcKwh::new(5.6))
                 .abs()
@@ -1472,6 +1487,13 @@ mod tests {
                 < 1e-9,
             "expected to stop at the ceiling, got {}",
             flow.energy_after_kwh
+        );
+        let absorbed_dc = 5.6 / 0.95;
+        let overflow_ac = (10.0 - absorbed_dc) * 0.97;
+        assert!(
+            (flow.ac_out_kwh - AcKwh::new(overflow_ac)).abs().get() < 1e-9,
+            "the overflow must leave through the meter: got {} expected {overflow_ac}",
+            flow.ac_out_kwh
         );
 
         // Import charges through `grid_to_battery`, on top of any PV.
@@ -1631,17 +1653,62 @@ mod tests {
     }
 
     #[test]
-    fn exports_midday_surplus_when_the_pack_is_full() {
+    fn a_full_pack_holds_the_battery_but_still_sells_the_surplus() {
         let params = params();
         let initial_soc = params.soc_ceiling;
 
         let plan =
             solve(&problem(hourly(&[0.5; 4], 10.0, 1.0), initial_soc, params)).expect("solve");
 
+        // The decision is about the pack, which is already full: nothing to charge, nothing
+        // to discharge, so the action is a hold. The money says the surplus left anyway —
+        // holding must not curtail it.
         assert!(
-            matches!(plan.steps[0].action, Action::Export { kw } if kw > AcKw::ZERO),
+            plan.steps[0].ac_kwh.get() > 1e-9,
             "PV surplus against a full pack must leave: {:?}",
-            plan.steps[0].action
+            plan.steps[0]
+        );
+        assert!(
+            plan.steps[0].net_czk.get() > 1e-9,
+            "the surplus is sold, not thrown away: {:?}",
+            plan.steps[0]
+        );
+    }
+
+    #[test]
+    fn a_grid_charge_block_curtails_its_surplus() {
+        // The one action that runs the plant in a no-export mode: a purchase must not be
+        // credited with selling the PV it is curtailing.
+        let slot = Slot {
+            mtu: Mtu {
+                start: T0,
+                hours: Hours::new(1.0),
+            },
+            price_sell: CzkPerKwh::new(1.0),
+            price_buy: CzkPerKwh::new(5.0),
+            pv_kw: DcKw::new(10.0),
+            load_kw: AcKw::new(1.0),
+        };
+
+        // 25.0 kWh in a 25.6 kWh pack: 0.6 kWh of headroom, so almost all the PV spills.
+        let flow = next_energy(
+            DcKwh::new(25.0),
+            &slot,
+            Action::Import { kw: AcKw::new(6.0) },
+            &params(),
+        );
+        assert!(
+            flow.ac_out_kwh.abs().get() < 1e-9,
+            "a buy curtails its surplus, got {}",
+            flow.ac_out_kwh
+        );
+
+        // The same state held instead still sells it.
+        let held = next_energy(DcKwh::new(25.0), &slot, Action::Idle, &params());
+        assert!(
+            held.ac_out_kwh.get() > 1.0,
+            "a hold sells the same surplus, got {}",
+            held.ac_out_kwh
         );
     }
 

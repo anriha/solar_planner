@@ -582,3 +582,92 @@ Still open: 172–177 encoding (tested by the user, not LCD-cross-checked in thi
 `max_sell_power = 0` semantics, `tou_power` as the export target rather than the pack's share
 (monitoring — expected to go PV-first), `marginal`/`explain` units, a cycle cost, and the first
 live write.
+
+### Phase 3a fix (2026-11-06, seventh session) — the plan that never appeared
+
+The first deploy of the planner (13:08) produced **no plan at all**. `[planner] no plan this
+tick: PV is forecast for 1794031200, an MTU that has no published price` every 60 s.
+1794031200 is 2026-11-07 07:00 Prague — tomorrow's first PV MTU.
+
+Reproduced against the live feeds, not guessed: OTE served 96 items for 2026-11-06 only
+(tomorrow published around 13:30 that day, later than the 13:10 this doc assumed), while
+forecast.solar answered today **and** tomorrow (07:00–16:30 next day). `assemble`'s PV guard
+was unbounded to the right — `forecast.keys().filter(|s| **s >= start)` — so the *unpriced
+tail* killed the whole cycle. That contradicts `Settled 1` above ("the horizon ends at the
+last published MTU") and the `horizon.rs` contract ("forecast beyond it is ignored"), so this
+is an implementation defect, not a design change.
+
+- **The horizon ends at the last published price, the PV tail is dropped.** The guard now
+  runs over `start ..= last_priced`: a *hole* inside the priced window is still a contract
+  break (a partial OTE answer must not read as a clear sky), a forecast *past* it is outside
+  the horizon and ignored. Pinned by `pv_beyond_the_last_published_price_is_ignored`,
+  `a_hole_inside_the_published_window_is_still_an_error`, the integration test
+  `a_forecast_past_the_published_prices_still_produces_a_plan`, and the live check
+  `live_horizon_ends_at_the_last_published_price` (`--ignored`; measured 138 MTUs from
+  13:30 today to 23:45 tomorrow).
+- **A refresh budget instead of a tick.** `is_fresh` asked the *price* cache to cover
+  `now .. now+24 h`; before tomorrow publishes it never can, so the horizon refetched every
+  60 s and forecast.solar's free tier (12 requests/hour/IP,
+  `x-ratelimit-limit: 12`, 429 from 13:20 after exactly twelve ticks) spent the quota in
+  twelve minutes. Now: prices and PV have **their own TTLs** (24 h coverage vs
+  `FORECAST_TTL_SECS` = 1800 s), attempts are floored at `REFRESH_FLOOR_SECS` = 300 s, a
+  failed attempt backs off 2× up to `RETRY_MAX_SECS` = 1800 s, and a 429's own
+  `x-ratelimit-retry-at` is honoured over all of it (`ForecastError::RateLimited`).
+  Steady-state cost: 2 PV requests an hour.
+- **Commits are per source.** `refresh` returns a `RefreshReport` (one `Result` per feed)
+  and commits each fetch independently. This one is not theoretical: at 13:31 the live OTE
+  service *was* serving tomorrow, and the deployed planner still logged
+  `PV is forecast for 1794031200` — the successful price fetch was thrown away because the
+  PV call 429ed in the same `?`. A rate limit could therefore hide newly published prices
+  until the quota reset.
+
+`cargo test` **161 passed / 0 failed / 3 ignored** (the two live-OTE checks and the new live
+horizon), `python3 -m unittest` **13 passed**, no new clippy warnings (the two in the tree —
+`NoPv::fetch` `manual_async_fn`, `tests/decode.rs::num` — predate this session),
+`nix build .#solar-bridge-arm` exit 0.
+
+Still open: nothing deployed from this session. After the deploy, the first plan should
+appear within one cycle; before ~13:30 it will be a *short* horizon ending at today's 23:45,
+which is correct and is what the plan view will show.
+
+### Phase 3a fix 2 (2026-11-06, seventh session) — a hold sells its surplus, and a restart stops writing
+
+Two defects found on the live deploy, both by looking at the calendar rather than the code.
+
+**A hold was curtailment.** `next_energy_hours` capped PV export by the action's target, so an
+`Idle` MTU (target 0) exported nothing — and the actuator agreed with it: a hold wrote
+`solar_sell = 0`, `max_sell_power = 0`, `work_mode = zero_export_load`. The current plan had a
+**28 h 45 min hold** covering all of tomorrow, i.e. the whole sunny forecast surplus thrown
+away, with "net +0.00 CZK" on the calendar to hide it. Holding is a decision about the
+**pack**, never an instruction to give the sun away:
+
+- `pv_overflow = spill − the part that meets the target`, credited for `Idle` and `Export`;
+  a `Import` block is the one exception (it runs in a no-export mode, so its surplus really is
+  curtailed and must not be paid for). `ac_out` is no longer capped by the target — an
+  overflow is not something the plant chose.
+- The actuator follows: a hold now writes `selling_first`, `solar_sell = 1` and
+  `max_sell_power = 12000`, and the **slot** does the holding (`tou_soc = 100`,
+  `tou_power = 0`, charge off). Write order is load-bearing: each slot's discharge cap goes out
+  before its target SOC, and the mode is armed last / disarmed first, so the pack is never
+  inside a slot rewrite with export live (the documented landmine: `selling_first` once
+  discharged 9.5–9.8 kW from the battery toward the previous target).
+- Replanned live with the Pi's own directives at 27.2 kWh: 21 segments / 319.02 CZK with a
+  19 h hold that curtailed → **13 segments / 313.37 CZK**, the first hold now
+  `11.3 kWh sold · +74.39 CZK`, day split 275.17 / 38.20. The expected net *drops* slightly and
+  that is the point: the old plan dumped pack energy at 5.9 CZK/kWh (worth 7.986 stored) only
+  because holding destroyed the PV instead. `plan_view` now reports the traded kWh of a hold
+  and buckets a day by metered sign, not by action.
+
+**A restart with the actuator off wrote three registers anyway.** `disarm_on_shutdown` ran on
+every SIGTERM, so a report-only deploy put the plant into zero-export: history at 13:33:33 —
+right after the 13:33:27 restart — shows `work_mode` `selling_first → zero_export_load`,
+`max_sell_power` `12000 → 0`, `solar_sell` `1 → 0`, which is `disarm_globals`. Now gated by
+`actuator::shutdown_disarms`: `actuator_enabled = false` means the inverter is left exactly as
+it was, and an unreadable directive state still disarms (unknown is not off).
+
+`cargo test` **166 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14 passed**, no new
+clippy warnings, `nix build .#solar-bridge-arm` exit 0.
+
+Still open: the first **live write** must watch `battery_power` during a hold that exports — it
+must sit near 0 while the export counters move. If the pack moves, the 0 W slot cap is not
+enough and the hold must go back to disarmed mode with a different overflow mechanism.

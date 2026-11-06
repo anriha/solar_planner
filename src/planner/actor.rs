@@ -320,11 +320,19 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         // Directives are live: the horizon takes the policy half on every cycle.
         self.horizon.set_params(horizon_params(&directives));
 
-        // The horizon owns its own refresh; a failure here leaves the previous window.
-        if !self.horizon.is_fresh(now)
-            && let Err(error) = self.horizon.refresh(now).await
+        // The horizon owns its own refresh, its own budget and its own per-source commits;
+        // a failure here leaves the previous window in place.
+        if self.horizon.needs_refresh(now)
+            && let Some(report) = self.horizon.refresh(now).await
         {
-            eprintln!("[planner] refresh failed, serving the cached window: {error}");
+            // One line per failing feed: they fail for different reasons (OTE publication
+            // lag vs a forecast.solar 429) and the fix differs.
+            if let Err(error) = &report.prices {
+                eprintln!("[planner] price refresh failed, serving the cached window: {error}");
+            }
+            if let Err(error) = &report.forecast {
+                eprintln!("[planner] forecast refresh failed, serving the cached window: {error}");
+            }
         }
 
         let slots = self.horizon.build(now)?;
