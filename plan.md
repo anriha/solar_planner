@@ -808,3 +808,78 @@ pre-existing lints remain: `map.rs::as_str` dead code and a `manual_async_fn` in
 
 Still open: nothing deployed. After `just deploy` and an HA reload the 40 entities appear on the
 "Solar Bridge efficiency" device; the plan is unchanged until one of them is edited.
+
+### Phase 3a fix 6 (2026-11-06, eleventh session) — the slot time the inverter would not store
+
+Reported as "max sell power is toggled between 10800 and 0 every minute, on every plan". It was
+not the plan: the actuator's **padding** wrote a TOU start the inverter cannot store, the write
+verification refused it, and the fail-closed path disarmed the plant. 10800 is just the plan's
+10.8 kW sell (nine 1.2 kW action steps) landing for a minute between disarms.
+
+Measured on the Pi, read-only: 37 `tou_time_*` refusals in 134 logged minutes (18 of the 38
+minutes before 18:37), every one of the shape `written = read back + 1 minute` — `0x077c/0x077b`
+(19:16/19:15), `0x0853/0x0852` (21:31/21:30), `0x0736/0x0735` (18:46/18:45). Sampling `/state`
+every 3 s while the plan's current step was `export 10.8 kW`:
+
+```
+18:37:28 max_sell=10800 selling_first     t6=21:30 p1=10800
+18:37:31 max_sell=0     zero_export_load  t6=19:30 p1=0      <- 19:31 refused, disarm
+18:38:41 max_sell=10800 selling_first     t6=21:30 p1=10800  <- six segments, no padding
+```
+
+The chain: `desired()` padded unused slots with `bump(last, 1)`; the inverter stores starts only
+on a **5-minute grid** (its own pre-planner LCD config was 01:00 / 17:00 / 20:10 / 21:40 / 22:25 /
+23:55 — 5-minute values, two of them not multiples of 15), so `19:31` never landed; `write_targets`
+stopped the batch at the first refusal — before `max_sell_power`, which is written after the slots
+— and `apply` disarmed: `zero_export_load`, `max_sell_power = 0`, `solar_sell = 0`, every slot cap
+0 and every target 100 %. The next tick re-armed, so the plant ran about half its minutes disarmed
+and the 18:30–19:15 evening peak sold at roughly half rate.
+
+- **Padding moves on the grid**: `SLOT_GRID_MINUTES = 5`, the fallback is `23:55` (not the
+  off-grid 23:59) and the no-future-segment anchor is floored through `on_grid()`. The tail still
+  piles up near midnight — now on 23:55, where the settings are identical.
+- **A refused slot start no longer disarms**: `actuator::is_slot_time` marks `tou_time_*` as
+  skippable and `slot_of` finds the slot, so `write_targets` leaves that one slot exactly as it
+  was and keeps writing the rest. Every money/mode register still stops the batch and disarms.
+- Tests: `padded_slots_land_on_the_inverters_five_minute_grid`,
+  `the_midnight_pile_up_stays_on_the_grid`, `an_empty_plan_still_starts_on_the_grid`,
+  `only_a_slot_start_time_may_be_skipped`.
+
+`cargo test` 80 lib passed / 0 failed / 3 ignored (full suite green), `python3 -m unittest` 14
+passed, `nix build .#solar-bridge-arm` exit 0, clippy unchanged (three pre-existing lints).
+
+Still open: **not deployed** — `just deploy` restarts the bridge and is the user's call. After it,
+the watch items are fix 2's (`battery_power` near 0 while a hold exports) plus "no `tou_time_*`
+refusal in the log for a full evening".
+
+### Battery rate knobs (2026-11-06, twelfth session) — the pack's two rates are policy
+
+Asked for HA values to set the battery's discharge rate, "and technically charge rate as well".
+Before this the DP hardcoded one `BATTERY_MAX_KW = 10.24` for both directions, while the
+inverter's own limit registers read **120 A** (≈6.14 kW) — invisible to the plan, which would
+happily price a 10.2 kW pack flow the battery setting does not deliver (the BMS overrides
+108/109 anyway; the knob is policy, not a register mirror).
+
+- **Two directives**: `battery_discharge_kw` and `battery_charge_kw`, kW **DC**, 0.5–10.24,
+  default 10.24. HA renders them as `Battery discharge limit` / `Battery charge limit` on the
+  planner device (step 0.1); the `label` field is a new, additive part of the directive schema.
+- **`Params` splits**: `battery_max_kw` became `battery_discharge_max_kw` (bounds `from_pack`
+  and the salvage rate) and `battery_charge_max_kw` (bounds `pv_charge` and `room_left`). The
+  grid charger's own 9.472 kW / 185 A stays a device fact — a charge rate above it simply never
+  binds on an import.
+- **Actuator follows**: `grid_charge_current` is clamped to the lower of the configured rate and
+  185 A; `Desired::charge_limit_a` carries the binding ceiling so the log names it instead of
+  always claiming 185 A.
+- **Old files load unchanged**: both fields are `serde(default)` at 10.24, so the Pi's
+  version-36 `directives.json` upgrades with no plan change.
+- Tests: `a_lowered_charge_rate_clamps_the_current_register`,
+  `a_charge_rate_above_the_registers_ceiling_still_writes_185_a`,
+  `the_two_battery_rate_limits_are_directional`, `device_params_carry_the_battery_rate_limits`,
+  plus the schema and legacy-load assertions.
+
+`cargo test --all-targets` **187 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14
+passed**, clippy clean through the flake devshell (no new findings).
+
+Still open: **not deployed**. After `just deploy` and an HA reload the two entities appear on
+"Solar Bridge planner"; set them to 6.1 to line the plan up with the 120 A registers, or leave
+them at 10.24 to keep pricing the pack's full 200 A.

@@ -32,6 +32,17 @@
 //! Whether the pack really stays put is the one thing to watch on the first live write —
 //! `battery_power` must sit near 0 while a hold exports.
 //!
+//! # The slot grid (2026-11-06, second fix)
+//!
+//! The inverter stores a TOU start time only on a **5-minute grid**. Writing `19:31` is
+//! refused and the register keeps `19:30`, so the padding below emits grid-aligned starts
+//! only, and a refused start leaves that one slot as it was instead of disarming the plant.
+//! Before this, every plan whose remaining civil day had fewer than six segments padded with
+//! `last + 1 minute`, the write was refused, the batch stopped, the fail-closed path
+//! disarmed (`max_sell_power = 0`, `solar_sell = 0`, `zero_export_load`) and the next tick
+//! re-armed: `max_sell_power` visibly flipped 10800 ↔ 0 about every other minute and roughly
+//! half of the evening peak was never sold.
+//!
 //! # Landmine this module exists to avoid
 //!
 //! `selling_first` with a target SOC *above* the pack exported 9.5–9.8 kW from the battery
@@ -53,6 +64,12 @@ use crate::planner::{Action, Plan, PlanStep};
 pub const SLOTS: usize = 6;
 /// Register 143 accepts 0–16000 W; the interface rating is the real bound.
 const MAX_SELL_W: f64 = 12_000.0;
+/// The inverter stores a TOU start only on a 5-minute grid: a value like `19:31` is refused
+/// and the register keeps its previous value (measured 2026-11-06 — every `tou_time_*`
+/// refusal in a 134-minute log was `written = read back + 1 minute`).
+const SLOT_GRID_MINUTES: usize = 5;
+/// The last start the grid offers before midnight; used when `bump` runs past 23:59.
+const LAST_GRID_START: &str = "23:55";
 /// Pack nominal voltage, for the amp conversion the charger wants.
 const PACK_VOLTS: f64 = 51.2;
 /// Register 128's ceiling (185 A), which is also below the 200 A BMS limit. Asking for more
@@ -64,6 +81,10 @@ const MAX_CHARGE_A: f64 = 185.0;
 pub struct ActuatorParams {
     pub soc_floor_pct: f64,
     pub soc_ceiling_pct: f64,
+    /// `Directives::battery_charge_kw`: the highest DC power the pack may charge at. The
+    /// plan is already bounded by it; this clamps the current register to the same rate so
+    /// the charger is never asked for more than the operator allows.
+    pub battery_charge_kw: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +117,11 @@ pub struct Desired {
     pub max_sell_w: u16,
     pub grid_charge: bool,
     pub charge_current_a: u16,
-    /// The commanded import exceeded reg 128's 185 A ceiling and was clamped.
+    /// The commanded import exceeded the pack's charge rate or reg 128's 185 A ceiling and
+    /// was clamped.
     pub charge_current_limited: bool,
+    /// The binding ceiling in amps: the lower of the configured pack rate and 185 A.
+    pub charge_limit_a: u16,
     /// The import the plan asked for, before the clamp — logged when limited.
     pub charge_requested_kw: f64,
 }
@@ -134,32 +158,49 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
         .collect();
 
     if blocks.is_empty() {
-        blocks.push(block(hhmm(now, &zone), Kind::Hold, params));
+        blocks.push(block(on_grid(&hhmm(now, &zone)), Kind::Hold, params));
     }
-    // Unused slots repeat the last setting one minute apart, so the inverter never falls back
-    // to whatever schedule preceded the planner. Near midnight they pile up on 23:59 — the
-    // settings are identical, so a duplicate start cannot change what the inverter does.
+    // Unused slots repeat the last setting one grid step apart, so the inverter never falls
+    // back to whatever schedule preceded the planner. The step must be a multiple of the
+    // inverter's 5-minute grid: a start it cannot store is refused, the batch stops there and
+    // the fail-closed path disarms the whole plant (2026-11-06). Near midnight the grid runs
+    // out and the last slots pile up on 23:55 — the settings are identical, so a duplicate
+    // start cannot change what the inverter does.
     while blocks.len() < SLOTS {
         let last = blocks.last().expect("non-empty").clone();
-        let start = bump(&last.start, 1).unwrap_or_else(|| "23:59".to_string());
+        let start = bump(&last.start, SLOT_GRID_MINUTES)
+            .map(|start| on_grid(&start))
+            .unwrap_or_else(|| LAST_GRID_START.to_string());
         blocks.push(Block { start, ..last });
     }
 
-    let (max_sell_w, charge_current_a, charge_current_limited, charge_requested_kw) = match current {
-        Kind::Sell { kw } => ((kw * 1000.0).round() as u16, 0, false, 0.0),
+    let (
+        max_sell_w,
+        charge_current_a,
+        charge_current_limited,
+        charge_limit_a,
+        charge_requested_kw,
+    ) = match current {
+        Kind::Sell { kw } => ((kw * 1000.0).round() as u16, 0, false, 0, 0.0),
         Kind::Buy { kw } => {
+            // The plan's AC import as pack amps, at the nominal voltage. Two ceilings bind:
+            // the operator's DC charge rate (`battery_charge_kw`) and reg 128's own 185 A.
+            // The DP already prices against the rate, so this clamp only catches the AC/DC
+            // conversion gap — but without it a 6.1 kW charge rate would still write 126 A.
             let wanted = (kw * 1000.0) / PACK_VOLTS;
+            let limit = (params.battery_charge_kw * 1000.0 / PACK_VOLTS).min(MAX_CHARGE_A);
             (
                 0,
-                wanted.round().min(MAX_CHARGE_A) as u16,
-                wanted > MAX_CHARGE_A,
+                wanted.min(limit).round() as u16,
+                wanted > limit,
+                limit.round() as u16,
                 kw,
             )
         }
         // A hold exports whatever the pack cannot take, so the export cap is the interface
         // rating, not zero. Nothing leaves the pack: the slot's own power cap is 0 W and its
         // target SOC is 100 %, so this number only lets PV through.
-        Kind::Hold => (MAX_SELL_W as u16, 0, false, 0.0),
+        Kind::Hold => (MAX_SELL_W as u16, 0, false, 0, 0.0),
     };
 
     Desired {
@@ -170,6 +211,7 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
         grid_charge: matches!(current, Kind::Buy { .. }),
         charge_current_a,
         charge_current_limited,
+        charge_limit_a,
         charge_requested_kw,
     }
 }
@@ -198,6 +240,21 @@ fn bump(start: &str, by: usize) -> Option<String> {
         return None;
     }
     Some(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+/// `HH:MM` floored to the inverter's slot grid.
+///
+/// A start off the grid can never be stored, so no such value may leave this module. The
+/// fallback only fires on a malformed string, which `hhmm` and `bump` do not produce.
+fn on_grid(start: &str) -> String {
+    let Some((hour, minute)) = start.split_once(':') else {
+        return "00:00".to_string();
+    };
+    let (Ok(hour), Ok(minute)) = (hour.parse::<usize>(), minute.parse::<usize>()) else {
+        return "00:00".to_string();
+    };
+    let total = (hour * 60 + minute) / SLOT_GRID_MINUTES * SLOT_GRID_MINUTES;
+    format!("{:02}:{:02}", total / 60, total % 60)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -497,6 +554,25 @@ pub fn writes(
     writes_for(&targets(desired), observed)
 }
 
+/// Whether a refused write of this register may be skipped instead of stopping the batch.
+///
+/// Only a slot **start** time qualifies: the inverter floors those to its 5-minute grid, so a
+/// value it cannot store leaves the previous one — the same setting, one slot earlier — in
+/// force. Every other register here is money or mode (export cap, solar sell, work mode,
+/// discharge cap, charge enable), and a refusal there still stops the batch and disarms.
+pub fn is_slot_time(name: &str) -> bool {
+    name.starts_with("tou_time_")
+}
+
+/// The TOU slot a register belongs to (`tou_soc_3` → 3), so a slot whose start the inverter
+/// refused can be left exactly as it was while the rest of the plan still lands.
+pub fn slot_of(name: &str) -> Option<usize> {
+    const PREFIXES: [&str; 4] = ["tou_time_", "tou_power_", "tou_soc_", "tou_charge_source_"];
+    PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix)?.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +626,14 @@ mod tests {
         ActuatorParams {
             soc_floor_pct: 20.0,
             soc_ceiling_pct: 80.0,
+            battery_charge_kw: 10.24,
+        }
+    }
+
+    fn params_charging_at(kw: f64) -> ActuatorParams {
+        ActuatorParams {
+            battery_charge_kw: kw,
+            ..params()
         }
     }
 
@@ -652,7 +736,38 @@ mod tests {
 
         assert_eq!(desired.charge_current_a, 185);
         assert!(desired.charge_current_limited);
+        assert_eq!(desired.charge_limit_a, 185, "the register's own ceiling binds");
         assert_eq!(desired.charge_requested_kw, 12.0);
+    }
+
+    #[test]
+    fn a_lowered_charge_rate_clamps_the_current_register() {
+        // 6.144 kW at 51.2 V is 120 A — the number the inverter's battery setting was at
+        // when this knob was asked for. The plan's 12 kW import asks for 234 A; the
+        // configured rate, not the register's 185 A, must be what binds.
+        let desired = desired(
+            &plan(vec![Action::Import { kw: AcKw::new(12.0) }]),
+            T0,
+            &params_charging_at(6.144),
+        );
+
+        assert_eq!(desired.charge_current_a, 120);
+        assert!(desired.charge_current_limited);
+        assert_eq!(desired.charge_limit_a, 120);
+    }
+
+    #[test]
+    fn a_charge_rate_above_the_registers_ceiling_still_writes_185_a() {
+        // The knob may only lower: 10.24 kW is 200 A, but reg 128 stops at 185 A.
+        let desired = desired(
+            &plan(vec![Action::Import { kw: AcKw::new(12.0) }]),
+            T0,
+            &params_charging_at(10.24),
+        );
+
+        assert_eq!(desired.charge_current_a, 185);
+        assert_eq!(desired.charge_limit_a, 185);
+        assert!(desired.charge_current_limited);
     }
 
     /// Ten distinct one-hour segments: the plan is longer than the six slots can hold.
@@ -694,6 +809,90 @@ mod tests {
             desired.blocks[5].power_w, 7000,
             "the seventh segment takes the slot the first one freed"
         );
+    }
+
+    /// Four one-MTU segments: sell, hold, sell, hold. The plan runs out before the sixth slot.
+    fn four_segments() -> Plan {
+        plan(vec![
+            Action::Export { kw: AcKw::new(1.0) },
+            Action::Idle,
+            Action::Export { kw: AcKw::new(2.0) },
+            Action::Idle,
+        ])
+    }
+
+    #[test]
+    fn padded_slots_land_on_the_inverters_five_minute_grid() {
+        // 2026-11-06: a padded start one minute after the last segment (00:46) is refused by
+        // the inverter, which keeps 00:45 — the batch stopped there and the plant disarmed.
+        let desired = desired(&four_segments(), T0, &params());
+
+        assert_eq!(desired.blocks[4].start, "00:50");
+        assert_eq!(desired.blocks[5].start, "00:55");
+        for block in &desired.blocks {
+            let (hour, minute) = block.start.split_once(':').expect("HH:MM");
+            let total: usize =
+                hour.parse::<usize>().unwrap() * 60 + minute.parse::<usize>().unwrap();
+            assert_eq!(total % 5, 0, "{} is off the inverter's grid", block.start);
+        }
+    }
+
+    #[test]
+    fn the_midnight_pile_up_stays_on_the_grid() {
+        // The grid runs out at 23:55, so the tail piles up there instead of on the off-grid
+        // 23:59 the old padding used.
+        let start = T0 + 23 * 3600 + 30 * 60;
+        let plan = plan_at(
+            start,
+            vec![
+                Action::Export { kw: AcKw::new(1.0) },
+                Action::Idle,
+                Action::Idle,
+                Action::Idle,
+            ],
+        );
+        let desired = desired(&plan, start, &params());
+
+        assert_eq!(desired.blocks[0].start, "23:30");
+        assert_eq!(desired.blocks[1].start, "23:45");
+        assert_eq!(desired.blocks[2].start, "23:50");
+        assert_eq!(desired.blocks[3].start, "23:55");
+        assert_eq!(desired.blocks[5].start, "23:55", "the tail piles up on the grid");
+        assert!(
+            desired.blocks.iter().all(|block| block.start != "23:59"),
+            "an off-grid start leaked out: {:?}",
+            desired.blocks.iter().map(|b| &b.start).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_empty_plan_still_starts_on_the_grid() {
+        // No future segment: the anchor is `now`, floored to the grid.
+        let plan = plan_at(T0, vec![Action::Export { kw: AcKw::new(1.0) }]);
+        let desired = desired(&plan, T0 + 3600 + 7 * 60, &params());
+
+        assert_eq!(desired.blocks[0].start, "01:05");
+    }
+
+    #[test]
+    fn only_a_slot_start_time_may_be_skipped() {
+        assert!(is_slot_time("tou_time_3"));
+        for name in [
+            "tou_power_3",
+            "tou_soc_3",
+            "tou_charge_source_3",
+            "tou_enabled",
+            "max_sell_power",
+            "solar_sell",
+            "work_mode",
+            "grid_charge_enable",
+            "grid_charge_current",
+        ] {
+            assert!(!is_slot_time(name), "{name} must still stop the batch");
+        }
+        assert_eq!(slot_of("tou_time_4"), Some(4));
+        assert_eq!(slot_of("tou_charge_source_6"), Some(6));
+        assert_eq!(slot_of("max_sell_power"), None);
     }
 
     #[test]

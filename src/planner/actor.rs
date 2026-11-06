@@ -35,9 +35,9 @@ use crate::units::{AcKw, CzkPerKwh, DcKw, DcKwh, Quantity};
 
 /// Reg 102 = 628 Ah at ~51.2 V.
 const CAPACITY_KWH: f64 = 32.0;
-/// 200 A at ~51.2 V from the BMS — not regs 108/109.
-const BATTERY_MAX_KW: f64 = 10.24;
 /// Reg 128's 185 A at the same ~51.2 V; the grid charger is below the pack's own limit.
+/// The pack's two rates are **policy** now (`Directives::battery_discharge_kw` /
+/// `battery_charge_kw`), not constants; this charger ceiling is still hardware.
 const GRID_CHARGE_MAX_KW: f64 = 9.472;
 /// The plant's own AC draw: inverter standby plus the Pi.
 const PLANT_LOAD_KW: f64 = 0.09;
@@ -78,11 +78,14 @@ pub enum PlannerError {
 ///
 /// The four curves come from [`Directives`] as editable `(power, η)` points, so a
 /// measurement corrected from HA is what the next solve prices — no rebuild, no restart.
+/// The two pack rates are policy too: the plan is bounded by what the operator says the
+/// battery may move, which is how a pack-protecting `battery_discharge_kw` reaches the DP.
 pub fn device_params(directives: &Directives, terminal: TerminalValue) -> Params {
     Params {
         capacity_kwh: DcKwh::new(CAPACITY_KWH),
         max_power_kw: AcKw::new(directives.max_power_kw),
-        battery_max_kw: DcKw::new(BATTERY_MAX_KW),
+        battery_discharge_max_kw: DcKw::new(directives.battery_discharge_kw),
+        battery_charge_max_kw: DcKw::new(directives.battery_charge_kw),
         grid_charge_max_kw: DcKw::new(GRID_CHARGE_MAX_KW),
         pv_to_battery: curve(&directives.pv_to_battery),
         pv_to_grid: curve(&directives.pv_to_grid),
@@ -114,11 +117,13 @@ pub fn bootstrap_terminal() -> TerminalValue {
     }
 }
 
-/// The actuator's slice of policy: the SOC band it may write into the TOU targets.
+/// The actuator's slice of policy: the SOC band it may write into the TOU targets, and the
+/// pack charge rate its current register may not exceed.
 pub fn actuator_params(directives: &Directives) -> ActuatorParams {
     ActuatorParams {
         soc_floor_pct: directives.soc_floor.get(),
         soc_ceiling_pct: directives.soc_ceiling.get(),
+        battery_charge_kw: directives.battery_charge_kw,
     }
 }
 
@@ -183,6 +188,12 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
     /// Only registers that disagree with the inverter's readback are written unless `force`
     /// is set — a register the snapshot does not know about is an error, never an excuse to
     /// write every tick.
+    ///
+    /// A refused **slot start time** does not stop the batch: the inverter floors those to
+    /// its 5-minute grid, so a start it cannot store leaves the previous one in force, and
+    /// that slot is left exactly as it was while the rest of the plan still lands. Disarming
+    /// on one is what made `max_sell_power` flip 10800 ↔ 0 about every other minute
+    /// (2026-11-06). Every other register is money or mode and still stops the batch.
     async fn write_targets(
         &self,
         targets: &[actuator::Target],
@@ -209,19 +220,34 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         if writes.is_empty() {
             return true;
         }
-        let count = writes.len();
+        let mut applied = 0;
+        // The slot whose start was refused; its remaining registers are skipped too, so the
+        // slot keeps the settings it already had instead of a new schedule at an old start.
+        let mut skip: Option<usize> = None;
         for (name, value) in writes {
+            if skip.is_some() && skip == actuator::slot_of(&name) {
+                continue;
+            }
             if let Err(error) = bus.ask(WriteRegister { name: name.clone(), value }).await {
+                if actuator::is_slot_time(&name) {
+                    eprintln!(
+                        "[planner] write {name} refused ({error}); leaving that slot as it was"
+                    );
+                    skip = actuator::slot_of(&name);
+                    continue;
+                }
                 eprintln!("[planner] write {name} refused ({error}); stopping the batch");
                 return false;
             }
+            applied += 1;
         }
-        eprintln!("[planner] applied {count} register change(s)");
+        eprintln!("[planner] applied {applied} register change(s)");
         true
     }
 
-    /// Pushes the plan onto the inverter. Fail closed: any refused write is followed by a
-    /// [`Self::disarm`], not by leaving the mode where the batch happened to stop.
+    /// Pushes the plan onto the inverter. Fail closed: a refused money or mode write is
+    /// followed by a [`Self::disarm`], not by leaving the mode where the batch happened to
+    /// stop. A refused slot start is not one of those — see [`Self::write_targets`].
     async fn apply(
         &self,
         plan: &Plan,
@@ -232,8 +258,10 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         let desired = actuator::desired(plan, now, &actuator_params(directives));
         if desired.charge_current_limited {
             eprintln!(
-                "[planner] grid charge {:.1} kW exceeds the 185 A charger limit; commanding 185 A (≈9.47 kW DC)",
-                desired.charge_requested_kw
+                "[planner] grid charge {:.1} kW exceeds the {:.1} A charge limit; commanding {} A",
+                desired.charge_requested_kw,
+                f64::from(desired.charge_limit_a),
+                desired.charge_current_a
             );
         }
         let ok = self

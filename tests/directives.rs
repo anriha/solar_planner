@@ -14,6 +14,11 @@ fn defaults_are_the_phase_3a_tuning() {
     assert_eq!(d.soc_floor, Percent::try_from(20.0).unwrap());
     assert_eq!(d.soc_ceiling, Percent::try_from(80.0).unwrap());
     assert_eq!(d.max_power_kw, 12.0);
+    assert_eq!(
+        d.battery_discharge_kw, 10.24,
+        "the rate knobs start at the pack's rated 200 A"
+    );
+    assert_eq!(d.battery_charge_kw, 10.24);
     assert_eq!(d.buy_distribution_czk, Price::try_from(2.515).unwrap());
     assert_eq!(d.buy_seller_fee_czk, Price::try_from(0.3).unwrap());
     assert_eq!(d.sell_fee_czk, Price::try_from(0.5).unwrap());
@@ -31,6 +36,8 @@ fn apply_each_directive_and_bump_version() {
     assert!(d.apply("soc_floor", json!(25)).unwrap());
     assert!(d.apply("soc_ceiling", json!(75)).unwrap());
     assert!(d.apply("max_power_kw", json!(10.0)).unwrap());
+    assert!(d.apply("battery_discharge_kw", json!(6.144)).unwrap());
+    assert!(d.apply("battery_charge_kw", json!(6.144)).unwrap());
     assert!(d.apply("buy_distribution_czk", json!(2.4)).unwrap());
     assert!(d.apply("buy_seller_fee_czk", json!(0.35)).unwrap());
     assert!(d.apply("sell_fee_czk", json!(0.75)).unwrap());
@@ -44,13 +51,15 @@ fn apply_each_directive_and_bump_version() {
     assert_eq!(d.soc_floor.get(), 25.0);
     assert_eq!(d.soc_ceiling.get(), 75.0);
     assert_eq!(d.max_power_kw, 10.0);
+    assert_eq!(d.battery_discharge_kw, 6.144);
+    assert_eq!(d.battery_charge_kw, 6.144);
     assert_eq!(d.buy_distribution_czk.get(), 2.4);
     assert_eq!(d.buy_seller_fee_czk.get(), 0.35);
     assert_eq!(d.sell_fee_czk.get(), 0.75);
     assert_eq!(d.forecast_calibration, 0.45);
     assert_eq!(d.energy_step_kwh, 0.4);
     assert_eq!(d.action_step_kw, 1.0);
-    assert_eq!(d.version, 12);
+    assert_eq!(d.version, 14);
 }
 
 #[test]
@@ -133,6 +142,10 @@ fn numbers_outside_their_range_are_rejected_not_clamped() {
     for (name, value) in [
         ("max_power_kw", json!(0.1)),
         ("max_power_kw", json!(31.0)),
+        ("battery_discharge_kw", json!(0.1)),
+        ("battery_discharge_kw", json!(10.25)),
+        ("battery_charge_kw", json!(0.1)),
+        ("battery_charge_kw", json!(10.25)),
         ("buy_distribution_czk", json!(10_001.0)),
         ("buy_distribution_czk", json!(-0.5)),
         ("buy_seller_fee_czk", json!(10_001.0)),
@@ -195,6 +208,11 @@ fn a_file_written_before_the_switch_existed_loads_disabled() {
     assert_eq!(loaded.soc_floor.get(), 25.0);
     assert!(!loaded.actuator_enabled, "an upgraded deploy stays read-only");
     assert!(!loaded.disarm);
+    assert_eq!(
+        loaded.battery_discharge_kw, 10.24,
+        "a file without the rate knobs keeps the old hardcoded ceiling"
+    );
+    assert_eq!(loaded.battery_charge_kw, 10.24);
 }
 
 #[test]
@@ -254,9 +272,9 @@ fn corrupt_file_is_a_loud_error() {
 #[test]
 fn directive_schema_matches_frozen_contract() {
     // serde emits internally-tagged variants with alphabetically sorted keys
-    // (content buffering), so compare parsed JSON, not bytes. The first twelve entries are
-    // the policy scalars; the rest are the four curves in CURVE_NAMES order, five points ×
-    // (power, efficiency) each.
+    // (content buffering), so compare parsed JSON, not bytes. The first fourteen entries
+    // are the policy scalars; the rest are the four curves in CURVE_NAMES order, five
+    // points × (power, efficiency) each.
     let actual: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&directive_schema()).unwrap()).unwrap();
     let expected: serde_json::Value = serde_json::from_str(
@@ -267,6 +285,8 @@ fn directive_schema_matches_frozen_contract() {
             {"max":100.0,"min":0.0,"name":"soc_floor","nullable":false,"type":"number","unit":"%"},
             {"max":100.0,"min":0.0,"name":"soc_ceiling","nullable":false,"type":"number","unit":"%"},
             {"max":30.0,"min":0.5,"name":"max_power_kw","nullable":false,"type":"number","unit":"kW"},
+            {"label":"Battery discharge limit","max":10.24,"min":0.5,"name":"battery_discharge_kw","nullable":false,"step":0.1,"type":"number","unit":"kW"},
+            {"label":"Battery charge limit","max":10.24,"min":0.5,"name":"battery_charge_kw","nullable":false,"step":0.1,"type":"number","unit":"kW"},
             {"max":10000.0,"min":0.0,"name":"buy_distribution_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
             {"max":10000.0,"min":0.0,"name":"buy_seller_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
             {"max":10000.0,"min":0.0,"name":"sell_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},

@@ -62,6 +62,17 @@ pub const MIN_EFFICIENCY_PCT: f64 = 50.0;
 /// 16.5 kWp, so 30 leaves room without admitting a unit mix-up.
 pub const MAX_KNOT_KW: f64 = 30.0;
 
+/// The pack's rated DC power, both directions: 200 A at ~51.2 V from the BMS (regs
+/// 212/213), **not** regs 108/109, which the BMS overrides (wiki
+/// `entities/deye-inverter-energy-model.md`). The two battery rate directives default here
+/// and are capped by it: a knob may only lower what the hardware can do.
+pub const BATTERY_MAX_KW: f64 = 10.24;
+
+/// Lowest battery rate a directive accepts, kW. Zero would make the DP's pack limit
+/// invalid (`battery_discharge_max_kw must be positive`), and anything under half a
+/// kilowatt is a unit mix-up rather than a policy.
+pub const MIN_BATTERY_KW: f64 = 0.5;
+
 /// The four measured conversion paths (wiki `entities/deye-inverter-energy-model.md`), in
 /// the order they appear on the efficiency device. This table drives the meta schema, the
 /// wire keys and the name parser, so the three cannot drift apart.
@@ -235,6 +246,19 @@ pub struct Directives {
     pub soc_ceiling: Percent,
     /// The inverter's single AC interface rating, kW.
     pub max_power_kw: f64,
+    /// Highest DC power the pack may discharge at, kW. The DP bounds every action's pack
+    /// share — and the rate the horizon values stored energy at — by it, so the plan never
+    /// assumes a discharge the pack will not deliver.
+    ///
+    /// `serde(default)` because a `directives.json` written before the knob existed must
+    /// still load: it reads as the old hardcoded ceiling, so an upgrade changes no plan.
+    #[serde(default = "default_battery_discharge_kw")]
+    pub battery_discharge_kw: f64,
+    /// Highest DC power the pack may charge at, kW, from PV and the grid alike. The grid
+    /// charger's own 185 A ceiling (≈9.47 kW at the pack voltage) still applies on top, so
+    /// a rate above that never binds on an import.
+    #[serde(default = "default_battery_charge_kw")]
+    pub battery_charge_kw: f64,
     /// Distribution and the other regulated per-kWh charges on imported energy, CZK/kWh,
     /// VAT included. The buy side is `spot + buy_distribution_czk + buy_seller_fee_czk`
     /// (2026-11-06): the plant is on spot pricing both ways, so no flat tariff exists.
@@ -278,6 +302,15 @@ fn default_buy_seller_fee() -> Price {
     Price::try_from(0.3).expect("static bound")
 }
 
+/// The rated pack rate, as the `serde` default for a file written before the knob existed.
+fn default_battery_discharge_kw() -> f64 {
+    BATTERY_MAX_KW
+}
+
+fn default_battery_charge_kw() -> f64 {
+    BATTERY_MAX_KW
+}
+
 impl Default for Directives {
     fn default() -> Self {
         let percent = |value: f64| Percent::try_from(value).expect("static bound");
@@ -290,6 +323,8 @@ impl Default for Directives {
             soc_floor: percent(20.0),
             soc_ceiling: percent(80.0),
             max_power_kw: 12.0,
+            battery_discharge_kw: default_battery_discharge_kw(),
+            battery_charge_kw: default_battery_charge_kw(),
             buy_distribution_czk: default_buy_distribution(),
             buy_seller_fee_czk: default_buy_seller_fee(),
             sell_fee_czk: price(0.5),
@@ -434,6 +469,14 @@ impl Directives {
             "max_power_kw" => {
                 set(&mut self.max_power_kw, number_in(&value, name, 0.5..=30.0)?)
             }
+            "battery_discharge_kw" => set(
+                &mut self.battery_discharge_kw,
+                number_in(&value, name, MIN_BATTERY_KW..=BATTERY_MAX_KW)?,
+            ),
+            "battery_charge_kw" => set(
+                &mut self.battery_charge_kw,
+                number_in(&value, name, MIN_BATTERY_KW..=BATTERY_MAX_KW)?,
+            ),
             "buy_distribution_czk" => {
                 let new = price(&value, name)?;
                 if new.get() < 0.0 {
@@ -677,6 +720,8 @@ impl Message<GetCurrent> for DirectivesActor {
 //   {"name":"soc_floor","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
 //   {"name":"soc_ceiling","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%"}
 //   {"name":"max_power_kw","type":"number","min":0.5,"max":30.0,"nullable":false,"unit":"kW"}
+//   {"name":"battery_discharge_kw","type":"number","min":0.5,"max":10.24,"nullable":false,"unit":"kW","step":0.1,"label":"Battery discharge limit"}
+//   {"name":"battery_charge_kw","type":"number","min":0.5,"max":10.24,"nullable":false,"unit":"kW","step":0.1,"label":"Battery charge limit"}
 //   {"name":"buy_distribution_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
 //   {"name":"buy_seller_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
 //   {"name":"sell_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
@@ -687,9 +732,12 @@ impl Message<GetCurrent> for DirectivesActor {
 // min/max mirror the Percent/Price newtype bounds; nullable marks Option fields. `step`
 // was added 2026-11-06 (additive, HA reads it with `.get("step") or 1.0`): a slider whose
 // step is 1.0 cannot reach 2.515 or 0.3 at all, so every sub-unit price needs its own.
+// `label` (same date, additive) is the HA friendly name; the battery rate entities use it
+// because a generated "battery discharge kw" reads like a register, not a policy knob.
 // Ranges here are UX clamps only — Directives::apply() stays the validation
 // authority (it is also where the two buy charges are held to non-negative, which the
-// Price newtype alone would allow negative).
+// Price newtype alone would allow negative). The battery rates are capped at
+// BATTERY_MAX_KW because a knob may only lower what the 200 A BMS allows.
 //
 // Efficiency curves (2026-11-06): each of the four paths in CURVE_NAMES contributes
 // CURVE_SLOTS × 2 numbers, so the operator owns both coordinates of every point:
@@ -720,6 +768,9 @@ enum DirectiveSpec {
         unit: Option<&'static str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         step: Option<f64>,
+        /// The HA friendly name; omitted, HA derives one from `name`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'static str>,
     },
     /// One coordinate of one curve point: the same wire shape as [`Self::Number`], plus
     /// the display and placement hints the efficiency entities need. Serialized as
@@ -806,6 +857,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("%"),
             step: None,
+            label: None,
         },
         DirectiveSpec::Number {
             name: "soc_ceiling",
@@ -814,6 +866,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("%"),
             step: None,
+            label: None,
         },
         DirectiveSpec::Number {
             name: "max_power_kw",
@@ -822,6 +875,25 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("kW"),
             step: None,
+            label: None,
+        },
+        DirectiveSpec::Number {
+            name: "battery_discharge_kw",
+            min: MIN_BATTERY_KW,
+            max: BATTERY_MAX_KW,
+            nullable: false,
+            unit: Some("kW"),
+            step: Some(0.1),
+            label: Some("Battery discharge limit"),
+        },
+        DirectiveSpec::Number {
+            name: "battery_charge_kw",
+            min: MIN_BATTERY_KW,
+            max: BATTERY_MAX_KW,
+            nullable: false,
+            unit: Some("kW"),
+            step: Some(0.1),
+            label: Some("Battery charge limit"),
         },
         DirectiveSpec::Number {
             name: "buy_distribution_czk",
@@ -830,6 +902,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("CZK/kWh"),
             step: Some(0.001),
+            label: None,
         },
         DirectiveSpec::Number {
             name: "buy_seller_fee_czk",
@@ -838,6 +911,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("CZK/kWh"),
             step: Some(0.001),
+            label: None,
         },
         DirectiveSpec::Number {
             name: "sell_fee_czk",
@@ -846,6 +920,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("CZK/kWh"),
             step: Some(0.001),
+            label: None,
         },
         DirectiveSpec::Number {
             name: "forecast_calibration",
@@ -854,6 +929,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: None,
             step: None,
+            label: None,
         },
         DirectiveSpec::Number {
             name: "energy_step_kwh",
@@ -862,6 +938,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("kWh"),
             step: None,
+            label: None,
         },
         DirectiveSpec::Number {
             name: "action_step_kw",
@@ -870,6 +947,7 @@ pub fn directive_schema() -> serde_json::Value {
             nullable: false,
             unit: Some("kW"),
             step: None,
+            label: None,
         },
     ];
     specs.extend(curve_specs());

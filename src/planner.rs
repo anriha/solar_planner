@@ -363,10 +363,15 @@ pub struct Params {
     /// discharge alike — the inverter has one rating, not four. It bounds the plant's
     /// **total** AC, PV included, which is why the ladder tops out here.
     pub max_power_kw: AcKw,
-    /// The pack's own DC power limit, both directions (boot config): 200 A at ~51.2 V
-    /// ≈ 10.24 kW from the BMS, **not** regs 108/109. `max_power_kw` can be reached with
-    /// PV contributing, so this bounds only the pack's share of a flow.
-    pub battery_max_kw: DcKw,
+    /// The pack's own DC **discharge** limit, from `Directives::battery_discharge_kw`:
+    /// 200 A at ~51.2 V ≈ 10.24 kW from the BMS, **not** regs 108/109, and the operator
+    /// may lower it. `max_power_kw` can be reached with PV contributing, so this bounds
+    /// only the pack's share of a flow.
+    pub battery_discharge_max_kw: DcKw,
+    /// The pack's own DC **charge** limit, from `Directives::battery_charge_kw`, PV and
+    /// grid legs alike. The grid charger's 185 A ceiling below still applies on top; the
+    /// pack limit is what a lowered charge rate bites first when the sun is strong.
+    pub battery_charge_max_kw: DcKw,
     /// The grid charger's own DC limit: reg 128 tops out at 185 A, ≈ 9.47 kW at the pack
     /// voltage — below the pack's 10.24 kW, so a purchase is capped here unless PV is
     /// already charging. The actuator clamps its current register to the same number.
@@ -540,12 +545,12 @@ fn value_at(row: &[Czk], levels: &[DcKwh], energy_kwh: DcKwh) -> Czk {
 
 /// A stored DC kWh reaches the meter only through `battery_to_grid`, so the salvage price
 /// is applied to AC energy, not to DC energy. The curve is a function of power, not of
-/// energy: the tail is valued at the pack's rated discharge rate (`battery_max_kw`), the
-/// best measured efficiency on that path, which errors toward holding rather than dumping.
-/// Making the reference rate a `Params` field would be more honest, and should happen if
-/// anything else ever needs it.
+/// energy: the tail is valued at the pack's rated discharge rate
+/// (`battery_discharge_max_kw`), the best measured efficiency on that path, which errors
+/// toward holding rather than dumping. A lowered discharge limit moves the reference point
+/// with it, so the valuation never assumes a flow the pack will not deliver.
 fn salvage_energy(level: DcKwh, params: &Params) -> AcKwh {
-    AcKwh::new(level.get() * params.battery_to_grid.at(params.battery_max_kw))
+    AcKwh::new(level.get() * params.battery_to_grid.at(params.battery_discharge_max_kw))
 }
 
 /// Revenue minus cost of one MTU: money is a function of the metered AC only.
@@ -588,8 +593,11 @@ fn validate_params(params: &Params) -> Result<(), PlanError> {
     if params.max_power_kw <= AcKw::ZERO {
         return Err(invalid("max_power_kw must be positive"));
     }
-    if params.battery_max_kw <= DcKw::ZERO {
-        return Err(invalid("battery_max_kw must be positive"));
+    if params.battery_discharge_max_kw <= DcKw::ZERO {
+        return Err(invalid("battery_discharge_max_kw must be positive"));
+    }
+    if params.battery_charge_max_kw <= DcKw::ZERO {
+        return Err(invalid("battery_charge_max_kw must be positive"));
     }
     if params.grid_charge_max_kw <= DcKw::ZERO {
         return Err(invalid("grid_charge_max_kw must be positive"));
@@ -987,7 +995,7 @@ pub fn next_energy_hours(
     let pv_charge = params
         .pv_to_battery
         .through(spare_dc)
-        .min(params.battery_max_kw)
+        .min(params.battery_charge_max_kw)
         .min(headroom / hours);
     let pv_dc_charge = params.pv_to_battery.input_for(pv_charge);
 
@@ -1011,18 +1019,19 @@ pub fn next_energy_hours(
     let uncovered = (demand - pv_to_load - pv_export).max(AcKw::ZERO);
     let from_import = bought.min(uncovered);
 
-    // The pack covers the remainder of the demand, bounded by its power limit and by what
-    // it holds.
+    // The pack covers the remainder of the demand, bounded by its discharge limit and by
+    // what it holds.
     let shortfall = (uncovered - from_import).max(AcKw::ZERO);
     let from_pack = params
         .battery_to_grid
         .input_for(shortfall)
-        .min(params.battery_max_kw)
+        .min(params.battery_discharge_max_kw)
         .min(energy_kwh / hours);
 
-    // A purchase then fills whatever room the PV charge left, within the charger's own
-    // limit. Only what the pack can actually take is stored, and only that is billed.
-    let room_left = (params.battery_max_kw - pv_charge)
+    // A purchase then fills whatever room the PV charge left, within the pack's charge
+    // limit and the charger's own limit. Only what the pack can actually take is stored,
+    // and only that is billed.
+    let room_left = (params.battery_charge_max_kw - pv_charge)
         .max(DcKw::ZERO)
         .min((headroom - pv_charge * hours).max(DcKwh::ZERO) / hours)
         .min(params.grid_charge_max_kw);
@@ -1078,7 +1087,8 @@ mod tests {
         Params {
             capacity_kwh: DcKwh::new(CAPACITY),
             max_power_kw: AcKw::new(12.0),
-            battery_max_kw: DcKw::new(10.24),
+            battery_discharge_max_kw: DcKw::new(10.24),
+            battery_charge_max_kw: DcKw::new(10.24),
             grid_charge_max_kw: DcKw::new(9.472),
             pv_to_battery: EfficiencyCurve::flat(1.0),
             pv_to_grid: EfficiencyCurve::flat(1.0),
@@ -1319,13 +1329,15 @@ mod tests {
 
     #[test]
     fn pack_power_limit_bounds_both_directions() {
-        // 200 A at ~51.2 V ≈ 10.24 kW DC is the pack's own limit, not the 12 kW AC
-        // interface rating. A command may ask for the full interface and still get only
-        // what the pack can move — in both directions.
+        // 200 A at ~51.2 V ≈ 10.24 kW DC per direction is the pack's own limit, not the
+        // 12 kW AC interface rating. A command may ask for the full interface and still get
+        // only what the pack can move — in both directions.
         let params = params();
         // Fixture sanity only — the two ratings live in different domains, which is why
         // this compares raw numbers instead of the newtypes.
-        assert!(params.battery_max_kw.get() < params.max_power_kw.get());
+        assert!(
+            params.battery_discharge_max_kw.get() < params.max_power_kw.get()
+        );
         let slots = hourly(&[20.0], 0.0, 0.0);
         let slot = &slots[0];
 
@@ -1398,6 +1410,73 @@ mod tests {
         assert!(
             (deposited - DcKwh::new(5.0)).abs().get() < 1e-9,
             "the 5 kW charger must bind before the 10.24 kW pack: got {deposited}"
+        );
+    }
+
+    #[test]
+    fn the_two_battery_rate_limits_are_directional() {
+        // `battery_discharge_kw` and `battery_charge_kw` are separate knobs: lowering one
+        // must leave the other direction at the pack's rated rate. Both are DC-side caps.
+        let mut discharging = params();
+        discharging.battery_discharge_max_kw = DcKw::new(5.0);
+        let slot = hourly(&[20.0], 0.0, 0.0).remove(0);
+
+        let flow = next_energy(
+            DcKwh::new(25.0),
+            &slot,
+            Action::Export {
+                kw: AcKw::new(12.0),
+            },
+            &discharging,
+        );
+        assert!(
+            (flow.ac_out_kwh - AcKwh::new(5.0)).abs().get() < 1e-9,
+            "a 5 kW discharge limit must cap the export, got {}",
+            flow.ac_out_kwh
+        );
+
+        let flow = next_energy(
+            DcKwh::new(6.4),
+            &slot,
+            Action::Import {
+                kw: AcKw::new(12.0),
+            },
+            &discharging,
+        );
+        let deposited = flow.energy_after_kwh - DcKwh::new(6.4);
+        assert!(
+            (deposited - DcKwh::new(9.472)).abs().get() < 1e-9,
+            "the discharge knob must not throttle charging: got {deposited}"
+        );
+
+        // The charge knob is the mirror image: a 4 kW charge limit leaves discharge alone.
+        let mut charging = params();
+        charging.battery_charge_max_kw = DcKw::new(4.0);
+        let flow = next_energy(
+            DcKwh::new(6.4),
+            &slot,
+            Action::Import {
+                kw: AcKw::new(12.0),
+            },
+            &charging,
+        );
+        let deposited = flow.energy_after_kwh - DcKwh::new(6.4);
+        assert!(
+            (deposited - DcKwh::new(4.0)).abs().get() < 1e-9,
+            "a 4 kW charge limit must cap the deposit, got {deposited}"
+        );
+        let flow = next_energy(
+            DcKwh::new(25.0),
+            &slot,
+            Action::Export {
+                kw: AcKw::new(12.0),
+            },
+            &charging,
+        );
+        assert!(
+            (flow.ac_out_kwh - AcKwh::new(10.24)).abs().get() < 1e-9,
+            "the charge knob must not throttle discharge, got {}",
+            flow.ac_out_kwh
         );
     }
 

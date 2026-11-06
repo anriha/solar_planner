@@ -277,3 +277,31 @@ fn device_params_carry_the_directives_curves() {
     assert!((params.pv_to_battery.at(DcKw::new(0.5)) - 0.60).abs() < 1e-12);
     assert!((params.pv_to_battery.at(DcKw::new(6.0)) - 0.943).abs() < 1e-12);
 }
+
+/// The battery rate knobs are policy, not device facts: a value edited from HA must reach
+/// the DP on the next solve, in both directions and independently.
+#[test]
+fn device_params_carry_the_battery_rate_limits() {
+    use solar_controller::planner::actor::{bootstrap_terminal, device_params};
+    use solar_controller::units::DcKw;
+
+    let mut directives = Directives::default();
+    directives
+        .apply("battery_discharge_kw", serde_json::json!(5.5))
+        .unwrap();
+    directives
+        .apply("battery_charge_kw", serde_json::json!(4.0))
+        .unwrap();
+
+    let params = device_params(&directives, bootstrap_terminal());
+    assert!((params.battery_discharge_max_kw.get() - 5.5).abs() < 1e-12);
+    assert!((params.battery_charge_max_kw.get() - 4.0).abs() < 1e-12);
+    assert!(
+        (params.grid_charge_max_kw.get() - 9.472).abs() < 1e-12,
+        "the charger's own ceiling is still a device fact"
+    );
+    assert!(
+        params.battery_discharge_max_kw > DcKw::new(4.0),
+        "the two directions are independent"
+    );
+}
