@@ -6,6 +6,7 @@ use crate::{
     planner::Plan,
     protocol::{ServerMsg, StatePayload},
     telemetry::Snapshot,
+    view::View,
 };
 
 /// One open connection's outbound queue.
@@ -15,6 +16,10 @@ struct Conn {
     /// A frame was skipped because this connection's socket fell behind.
     /// Cleared by the first frame that gets through again.
     lagging: bool,
+    /// This connection has asked for a view, so it receives [`ServerMsg::View`] on every
+    /// plan change. Off by default: the view is a second copy of the plan in different
+    /// clothes, and Home Assistant has no use for it.
+    watches_view: bool,
 }
 
 #[derive(Actor, Default)]
@@ -40,6 +45,10 @@ pub struct Subscribe {
 }
 
 pub struct Unsubscribe(pub u64);
+
+/// Mark one connection as wanting plan-change views (board-zpe). Idempotent: a viewer that
+/// reloads and asks again stays a single subscriber.
+pub struct WatchView(pub u64);
 
 pub struct GetState;
 
@@ -112,6 +121,37 @@ impl StateActor {
         let msg = ServerMsg::state(&self.payload, &self.directives);
         self.push(msg);
     }
+
+    /// Send the flat plan projection to the connections that asked for one.
+    ///
+    /// Built **once** per plan change and cloned per watcher, not projected per connection:
+    /// the projection walks every MTU and formats every reason, and doing that n times for n
+    /// browser tabs would put the work on the actor that also feeds the 5 s telemetry stream.
+    ///
+    /// A withdrawn plan still pushes: an empty view is how a viewer learns to clear the chart
+    /// instead of drawing the plan it had a minute ago.
+    fn push_view(&mut self) {
+        if !self.subscribers.iter().any(|conn| conn.watches_view) {
+            return;
+        }
+        let now = jiff::Timestamp::now().as_second();
+        let view = View::of_plan(self.payload.plan.as_ref(), None, None, now);
+        let msg = ServerMsg::View { id: None, view };
+        for conn in self
+            .subscribers
+            .iter_mut()
+            .filter(|conn| conn.watches_view)
+        {
+            match conn.tx.try_send(msg.clone()) {
+                Ok(()) => {}
+                // A missed view costs one minute of freshness; the next plan change carries
+                // the whole horizon again, so nothing is lost by not queueing it.
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
+            }
+        }
+        self.subscribers.retain(|conn| !conn.tx.is_closed());
+    }
 }
 
 impl Message<Update> for StateActor {
@@ -148,6 +188,9 @@ impl Message<Update> for StateActor {
                 // equality check — every plan carries its own `computed_at`.
                 self.payload.plan = plan.clone();
                 self.push(ServerMsg::Plan { plan });
+                // The same change in the browser's flat shape, for the connections that
+                // asked for it (board-zpe). Home Assistant never sees this frame.
+                self.push_view();
             }
         }
     }
@@ -167,6 +210,7 @@ impl Message<Subscribe> for StateActor {
             id,
             tx: msg.tx,
             lagging: false,
+            watches_view: false,
         });
         eprintln!(
             "[state] conn {id} subscribed ({} open)",
@@ -192,6 +236,23 @@ impl Message<Unsubscribe> for StateActor {
                 msg.0,
                 self.subscribers.len()
             );
+        }
+    }
+}
+
+impl Message<WatchView> for StateActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: WatchView,
+        _ctx: &mut kameo::prelude::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        for conn in &mut self.subscribers {
+            if conn.id == msg.0 && !conn.watches_view {
+                conn.watches_view = true;
+                eprintln!("[state] conn {} watches the view", msg.0);
+            }
         }
     }
 }

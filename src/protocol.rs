@@ -49,7 +49,18 @@ pub enum ServerMsg {
     },
     /// The plan, pushed when the planner publishes one and re-sent to a subscriber that
     /// catches up after lagging. `None` withdraws it (planner off, or no horizon yet).
+    ///
+    /// The browser never reads this frame — it gets [`ServerMsg::View`] instead (board-zpe).
     Plan { plan: Option<Plan> },
+    /// The browser's flat projection of the plan (see [`crate::view::View`]).
+    ///
+    /// `id` is set on the reply to a `get_view`; it is absent on the push sent when the plan
+    /// changes, which goes only to connections that have asked for a view at least once.
+    View {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        view: crate::view::View,
+    },
     CmdAck {
         id: String,
         ok: bool,
@@ -109,6 +120,22 @@ pub enum ClientMsg {
         id: String,
         name: String,
         value: serde_json::Value,
+    },
+    /// Ask for the browser's flat plan projection (board-zpe).
+    ///
+    ///   client->server {"type":"get_view","id":"v1","from":1793746800,"to":1793833200}
+    ///   server->client {"type":"view","id":"v1","view":{...}}
+    ///
+    /// `from`/`to` are unix seconds and optional: omitted, both default to the plan's own
+    /// horizon. The window is clamped to [`crate::view::MAX_WINDOW_SECS`] — 60 days — and the
+    /// reply echoes the window actually served. Answering also subscribes the connection to
+    /// plan-change pushes; a client that never asks (Home Assistant) never receives them.
+    GetView {
+        id: String,
+        #[serde(default)]
+        from: Option<i64>,
+        #[serde(default)]
+        to: Option<i64>,
     },
     Ping,
 }

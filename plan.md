@@ -248,10 +248,12 @@ src/server.rs                   # DONE — axum WS + HTTP debug (2.1)
 src/directives.rs               # DONE — directive schema, validation, persistence, actor (2.4)
 src/units.rs                   # DONE — AC/DC/time/money newtypes, one curve per path
 src/planner.rs                 # DONE — DP solve, Action/Reason/Plan/PlanStep, ValueTable
+src/view.rs                    # DONE — flat browser projection of the plan (board-zpe)
 src/planner/{price,forecast,horizon,actor,actuator}.rs  # DONE — OTE + forecast.solar, horizon, cycle, plan->TOU
 custom_components/solar_bridge/plan_view.py   # DONE — plan -> runs + wording, no HA imports
 custom_components/solar_bridge/calendar.py    # DONE — one calendar event per run
 tests/planner.rs  tests/plan_wire.rs          # DONE — planner through its actors, wire contract
+tests/view.rs                  # DONE — view projection + tests/fixtures/view.json pin
 tests/test_plan_view.py                       # DONE — 13 stdlib tests, no HA install needed
 tests/decode.rs                # 11-vector contract — green
 tests/map_parse.rs             # 13 strict-loading tests — green
@@ -931,3 +933,39 @@ Still open: **not deployed**. On the first clear midday hold, watch that `batter
 reads `zero_export_load`, and that SOC stops at the ceiling. Second watch item: the device
 charges at `min(battery_charge_kw, reg 108)` — today reg 108 sat at 90 A for hours (4.6 kW), so
 a hold can fill slower than the DP prices until that register and the directive agree.
+
+### Phase 3a state (2026-11-09, fourteenth session) — the plan gets a browser projection
+
+Two board items, both pure Rust, neither deployed: **board-2ex** (the plan carries the curves it
+was decided against) and **board-zpe** (one flat payload the wasm viewer can render without
+parsing `Plan`).
+
+- **`PlanStep` gained `price_sell`, `price_buy`, `pv_kw`** (board-2ex). `Slot` already held all
+  four at solve time; copying them costs a measured 60.9 kB frame at 140 MTUs with every number
+  at full 17-digit precision — under the 90 kB ceiling. `load_kw` stays out on purpose: it is
+  the plant's own ~0.09 kW, a constant, never a decision input. HA reads only `action.kind/kw`
+  and ignores unknown keys, so the wire stays compatible in both directions.
+- **`src/view.rs` projects a plan onto one flat payload** (board-zpe): `steps[]` with the two
+  price series, PV, signed metered `ac_kw`, `command_kw` as a marker, `soc_end_pct`, `net_czk`,
+  a formatted `reason` plus `reason_kind`, and per-day totals split at Prague midnight.
+  `ac_actual_kw`/`soc_actual_pct`/`adherence` are present but `null`/empty — they are the
+  ledger's side (board-aru) and the shape is reserved so the viewer's contract does not change
+  when it lands.
+- **The metered-vs-command invariant is now enforced at the source**, not just in prose: bars
+  are `ac_kwh / hours` (an 8.4 kW export command metered 7.94 kW; a 9.6 kW import metered
+  8.84 kW), and `command_kw` exists only so a chart can annotate. `tests/view.rs` pins both.
+- **`get_view{from,to}` over the existing WS**, both bounds optional (default: the plan's own
+  horizon), answered with the window actually served. Longer than 60 days is clamped, never
+  rejected; `to <= from` is an error frame. Answering also subscribes the connection to
+  plan-change pushes — a **push per replan, opt-in**, so Home Assistant never receives a second
+  copy of the plan it does not read. The MTU-close push in the board's design needs the ledger
+  and lands with board-aru.
+- **The contract is a file**, not a shared crate: `tests/view.rs` projects a fixture plan into
+  `tests/fixtures/view.json` (regenerate with `UPDATE_VIEW_FIXTURE=1 cargo test --test view`)
+  and fails if a field is renamed. The viewer's own test will parse that same file (board-b0o).
+- **Not in this cut, on purpose**: no day-file history behind `get_view` (the bridge holds one
+  plan; a 7-day window returns only the current horizon until board-aru), no static file
+  serving for `/app` (board-b0o), no wasm packaging (board-fcg).
+
+`cargo test --all-targets` **201 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14
+passed**, clippy unchanged (three pre-existing lints), `nix build .#solar-bridge-arm` exit 0.

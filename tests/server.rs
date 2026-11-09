@@ -263,3 +263,111 @@ async fn write_valid_control_surfaces_bus_connect_failure() {
     assert_eq!(m["ok"], false);
     assert!(m["error"].as_str().unwrap().contains("connect"));
 }
+
+/// 2026-11-04T00:00 Prague; one export MTU is enough — these tests are about the view frame,
+/// not the plan.
+fn one_step_plan() -> solar_controller::planner::Plan {
+    use solar_controller::planner::{Action, Mtu, Plan, PlanStep, Reason};
+    use solar_controller::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours};
+    Plan {
+        computed_at: 1_793_746_800,
+        steps: vec![PlanStep {
+            mtu: Mtu {
+                start: 1_793_746_800,
+                hours: Hours::new(0.25),
+            },
+            price_sell: CzkPerKwh::new(7.9),
+            price_buy: CzkPerKwh::new(3.24),
+            pv_kw: DcKw::new(2.0),
+            action: Action::Export { kw: AcKw::new(8.4) },
+            battery_out_kwh: DcKwh::new(1.5),
+            ac_kwh: AcKwh::new(1.985),
+            energy_after_kwh: DcKwh::new(20.0),
+            net_czk: Czk::new(15.68),
+            marginal_czk_per_kwh: CzkPerKwh::new(5.32),
+            reason: Reason::PriceAboveStoredValue {
+                price_sell: CzkPerKwh::new(7.9),
+                marginal: CzkPerKwh::new(5.32),
+            },
+        }],
+        expected_net_czk: Czk::new(15.68),
+        horizon_end: 1_793_746_800 + 900,
+    }
+}
+
+/// board-zpe over the real socket: one `get_view` serves the whole horizon in the flat shape,
+/// and the connection is subscribed to plan changes from then on — the push carries no `id`.
+#[tokio::test]
+async fn get_view_answers_flat_and_then_pushes_on_every_replan() {
+    let (port, _dir, state) = setup_with(None).await;
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut ws).await; // hello
+
+    // No plan published yet: the reply is still a well-formed, empty view.
+    ws.send(Message::text(
+        json!({"type": "get_view", "id": "v1"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let reply = recv_json(&mut ws).await;
+    assert_eq!(reply["type"], "view");
+    assert_eq!(reply["id"], "v1");
+    assert!(reply["view"]["computed_at"].is_null());
+    assert_eq!(reply["view"]["steps"].as_array().unwrap().len(), 0);
+
+    // An empty window is a client error, not an empty chart to be mistaken for "no plan".
+    ws.send(Message::text(
+        json!({"type": "get_view", "id": "v2", "from": 10, "to": 10}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let bad = recv_json(&mut ws).await;
+    assert_eq!(bad["type"], "error");
+    assert!(bad["message"].as_str().unwrap().contains("empty window"));
+
+    state.ask(Update::Plan(Some(one_step_plan()))).await.unwrap();
+    let (mut saw_plan, mut saw_view) = (false, false);
+    for _ in 0..2 {
+        let m = recv_json(&mut ws).await;
+        match m["type"].as_str() {
+            Some("plan") => saw_plan = true,
+            Some("view") => {
+                saw_view = true;
+                assert!(m.get("id").is_none(), "a push carries no request id");
+                assert_eq!(m["view"]["steps"].as_array().unwrap().len(), 1);
+                // The bar is metered power; the command sits beside it as a marker.
+                assert_eq!(m["view"]["steps"][0]["ac_kw"], 7.94);
+                assert_eq!(m["view"]["steps"][0]["command_kw"], 8.4);
+            }
+            other => panic!("unexpected message type: {other:?}"),
+        }
+    }
+    assert!(saw_plan && saw_view);
+}
+
+/// The view is a second copy of the plan in different clothes, and Home Assistant has no use
+/// for it: a connection that never asks for a view must never be sent one.
+#[tokio::test]
+async fn a_connection_that_never_asked_is_never_sent_a_view_push() {
+    let (port, _dir, state) = setup_with(None).await;
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut ws).await; // hello
+    // A pong proves the subscription is registered (see the other tests).
+    ws.send(Message::text(json!({"type": "ping"}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(recv_json(&mut ws).await["type"], "pong");
+
+    state.ask(Update::Plan(Some(one_step_plan()))).await.unwrap();
+    assert_eq!(recv_json(&mut ws).await["type"], "plan");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), ws.next())
+            .await
+            .is_err(),
+        "a plan push was followed by a view frame this connection never asked for"
+    );
+}

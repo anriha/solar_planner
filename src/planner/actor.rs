@@ -26,15 +26,13 @@ use crate::planner::forecast::PvSource;
 use crate::planner::horizon::{HorizonActor, HorizonError, HorizonParams};
 use crate::planner::price::PriceSource;
 use crate::planner::{
-    BOOTSTRAP_TERMINAL_CZK_PER_KWH, EfficiencyCurve, Params, Plan, PlanError, Problem,
-    TerminalValue, solve,
+    BOOTSTRAP_TERMINAL_CZK_PER_KWH, CAPACITY_KWH, EfficiencyCurve, Params, Plan, PlanError,
+    Problem, TerminalValue, solve,
 };
 use crate::state::{GetState, StateActor, Update};
 use crate::telemetry::{ExtractError, PlanningSignals};
 use crate::units::{AcKw, CzkPerKwh, DcKw, DcKwh, Quantity};
 
-/// Reg 102 = 628 Ah at ~51.2 V.
-const CAPACITY_KWH: f64 = 32.0;
 /// Reg 128's 185 A at the same ~51.2 V; the grid charger is below the pack's own limit.
 /// The pack's two rates are **policy** now (`Directives::battery_discharge_kw` /
 /// `battery_charge_kw`), not constants; this charger ceiling is still hardware.

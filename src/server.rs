@@ -17,7 +17,8 @@ use crate::{
     bus::{BusActor, WriteRegister},
     directives::{ApplyDirective, Directives, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
-    state::{GetState, StateActor, Subscribe, Unsubscribe},
+    state::{GetState, StateActor, Subscribe, Unsubscribe, WatchView},
+    view::View,
 };
 
 /// Outbound frames buffered per connection. At the 5 s poll this is ~2.7 min
@@ -103,10 +104,10 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ServerMsg>(CHANNEL_CAP);
     let ack_tx = tx.clone();
-    let Ok(id) = app.state.ask(Subscribe { tx }).await else {
+    let Ok(conn_id) = app.state.ask(Subscribe { tx }).await else {
         return;
     };
-    eprintln!("[server] {peer}: connected as conn {id}");
+    eprintln!("[server] {peer}: connected as conn {conn_id}");
 
     // Single writer owns the sink; on exit it unsubscribes so a dead
     // connection can't leak a channel sender in StateActor.
@@ -127,7 +128,7 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
                 }
             }
         }
-        let _ = writer_state.tell(Unsubscribe(id)).send().await;
+        let _ = writer_state.tell(Unsubscribe(conn_id)).send().await;
     });
 
     loop {
@@ -192,6 +193,9 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
                     },
                 }
             }
+            Ok(ClientMsg::GetView { id, from, to }) => {
+                view_reply(&app, conn_id, id, from, to).await
+            }
             Err(e) => ServerMsg::Error {
                 message: format!("malformed message: {e}"),
             },
@@ -203,9 +207,41 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
 
     // Socket closed or writer died: drop our sender, unsubscribe, reap writer.
     drop(ack_tx);
-    let _ = app.state.tell(Unsubscribe(id)).send().await;
+    let _ = app.state.tell(Unsubscribe(conn_id)).send().await;
     writer.abort();
     eprintln!("[server] {peer}: closed");
+}
+
+/// The `get_view` reply: the flat plan projection over the requested window (board-zpe).
+///
+/// Registering the watch comes **before** the reply is sent. A plan published in the gap
+/// between the two would otherwise never reach this connection, and the viewer would sit on
+/// a chart it has no way to refresh until it reconnects.
+async fn view_reply(
+    app: &AppState,
+    conn_id: u64,
+    id: String,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> ServerMsg {
+    if let (Some(from), Some(to)) = (from, to)
+        && to <= from
+    {
+        return ServerMsg::Error {
+            message: format!("get_view: empty window {from}..{to}"),
+        };
+    }
+    let Ok(payload) = app.state.ask(GetState).await else {
+        return ServerMsg::Error {
+            message: "state actor unavailable".into(),
+        };
+    };
+    let _ = app.state.tell(WatchView(conn_id)).send().await;
+    let now = jiff::Timestamp::now().as_second();
+    ServerMsg::View {
+        id: Some(id),
+        view: View::of_plan(payload.plan.as_ref(), from, to, now),
+    }
 }
 
 async fn state_handler(State(app): State<AppState>) -> Response {

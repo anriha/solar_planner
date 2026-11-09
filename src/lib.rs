@@ -11,3 +11,4 @@ pub mod directives;
 pub mod server;
 pub mod planner;
 pub mod units;
+pub mod view;

@@ -47,6 +47,14 @@ pub mod forecast;
 pub mod horizon;
 pub mod price;
 
+/// The pack's nameplate capacity: reg 102 = 628 Ah at ~51.2 V.
+///
+/// A **device** fact, not policy: it changes when the hardware does. It lives here rather
+/// than in [`actor`] because the browser view needs the same number to turn the plan's
+/// energy into a SOC percentage, and a second copy of a nameplate in a projection is how
+/// two surfaces start disagreeing about the pack.
+pub const CAPACITY_KWH: f64 = 32.0;
+
 /// One market time unit. `start` is unix seconds, `hours` is its length (0.25 for the
 /// 15-minute day-ahead MTU, 1.0 if an hourly feed is ever used).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -436,6 +444,50 @@ pub enum Reason {
     },
     /// Nothing to trade this MTU.
     Idle,
+}
+
+impl Reason {
+    /// The variant name as it appears on the wire (the serde tag).
+    ///
+    /// Hand-written rather than read back out of a serialized copy: the projection runs once
+    /// per MTU per minute, and this keeps it allocation-free. [`tests`] pins it against serde
+    /// so the two cannot drift.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Reason::PriceAboveStoredValue { .. } => "price_above_stored_value",
+            Reason::PvCannotBeStored { .. } => "pv_cannot_be_stored",
+            Reason::BuyBelowFutureValue { .. } => "buy_below_future_value",
+            Reason::HoldForLater { .. } => "hold_for_later",
+            Reason::Idle => "idle",
+        }
+    }
+
+    /// One line a chart can label a bar with. The numbers are the ones the decision compared,
+    /// so a surprising plan explains itself without a second lookup.
+    pub fn describe(&self) -> String {
+        match *self {
+            Reason::PriceAboveStoredValue {
+                price_sell,
+                marginal,
+            } => format!("sell {:.2} > stored {:.2} CZK/kWh", price_sell, marginal),
+            Reason::PvCannotBeStored {
+                pv_kw,
+                headroom_kw,
+            } => format!("PV {:.1} kW, headroom {:.1} kW", pv_kw, headroom_kw),
+            Reason::BuyBelowFutureValue {
+                price_buy,
+                marginal,
+            } => format!("buy {:.2} < later {:.2} CZK/kWh", price_buy, marginal),
+            Reason::HoldForLater {
+                marginal,
+                best_later_price,
+            } => format!(
+                "hold: stored {:.2}, best later {:.2} CZK/kWh",
+                marginal, best_later_price
+            ),
+            Reason::Idle => "idle".to_string(),
+        }
+    }
 }
 
 /// One MTU of the plan.
