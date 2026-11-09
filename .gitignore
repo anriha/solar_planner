@@ -453,3 +453,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# trunk output for the wasm viewer
+viewer/dist/

@@ -1,0 +1,45 @@
+[package]
+name = "viewer"
+version = "0.1.0"
+edition = "2024"
+
+# One codebase, two targets: a native window (`cargo run -p viewer`) and the wasm build
+# trunk serves from the bridge at /app. The renderer is glow (WebGL2) on the web, which
+# every desktop browser has, rather than wgpu's WebGPU — that one still depends on browser
+# flags on Linux Firefox, and this viewer has to work on the machine it is opened from.
+[dependencies]
+egui_plot = "0.38.0"
+ewebsock = "0.8.0"
+jiff = { version = "0.2.39", default-features = false, features = ["std", "tz-fat", "tzdb-bundle-always"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "system_fonts",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+# Pinned to the version nixpkgs carries a matching wasm-bindgen-cli for (0.2.126), so the
+# Nix build can use the pinned CLI instead of downloading one (board-fcg).
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "=0.4.76"
+# std's Instant/SystemTime are unsupported on wasm32-unknown-unknown; this is the same API
+# over performance.now().
+web-time = "1.1.0"
+js-sys = "=0.3.103"
+web-sys = { version = "=0.3.103", features = [
+    "Document",
+    "HtmlCanvasElement",
+    "Location",
+    "Window",
+] }

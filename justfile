@@ -16,7 +16,7 @@ test:
 build:
     nix build .#default
 
-# aarch64 musl static binary for the Pi
+# aarch64 musl static binary for the Pi, with the viewer embedded
 build-arm:
     nix build .#solar-bridge-arm
 
@@ -36,6 +36,14 @@ install-unit:
     scp systemd/solar-bridge.service {{ pi_host }}:.config/systemd/user/solar-bridge.service
     ssh {{ pi_host }} "systemctl --user daemon-reload && systemctl --user enable --now solar-bridge"
     @echo "if not done yet: ssh -t {{ pi_host }} 'sudo loginctl enable-linger konazumi'"
+
+# build the viewer's dist for a local `cargo build`; the Nix builds use .#wasm instead
+web:
+    cd viewer && trunk build --release --public-url ./
+
+# the wasm bundle as a Nix package, which is what gets embedded into the bridge binaries
+web-nix:
+    nix build .#wasm
 
 deploy-ha:
     ssh {{ ha_host }} "rm -rf /tmp/solar_bridge"

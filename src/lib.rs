@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod bus;
 pub mod decode;
 pub mod map;

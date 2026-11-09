@@ -6,7 +6,6 @@ use crate::{
     planner::Plan,
     protocol::{ServerMsg, StatePayload},
     telemetry::Snapshot,
-    view::View,
 };
 
 /// One open connection's outbound queue.
@@ -16,10 +15,10 @@ struct Conn {
     /// A frame was skipped because this connection's socket fell behind.
     /// Cleared by the first frame that gets through again.
     lagging: bool,
-    /// This connection has asked for a view, so it receives [`ServerMsg::View`] on every
-    /// plan change. Off by default: the view is a second copy of the plan in different
-    /// clothes, and Home Assistant has no use for it.
-    watches_view: bool,
+    /// This connection has asked for a view, so it receives a [`ServerMsg::PlanChanged`]
+    /// notice on every plan change. Off by default: Home Assistant never asks for a view
+    /// and has no use for the notice.
+    watches_plan: bool,
 }
 
 #[derive(Actor, Default)]
@@ -46,9 +45,9 @@ pub struct Subscribe {
 
 pub struct Unsubscribe(pub u64);
 
-/// Mark one connection as wanting plan-change views (board-zpe). Idempotent: a viewer that
-/// reloads and asks again stays a single subscriber.
-pub struct WatchView(pub u64);
+/// Mark one connection as wanting plan-change notices (board-zpe). Idempotent: a viewer
+/// that reloads and asks again stays a single subscriber.
+pub struct WatchPlan(pub u64);
 
 pub struct GetState;
 
@@ -103,6 +102,11 @@ impl StateActor {
         let plan = ServerMsg::Plan {
             plan: self.payload.plan.clone(),
         };
+        // A browser that fell behind also lost the "ask again" notice, and would sit on a
+        // chart one replan stale until the next one. The catch-up is where both are repaired.
+        let changed = ServerMsg::PlanChanged {
+            computed_at: self.payload.plan.as_ref().map(|plan| plan.computed_at),
+        };
         for conn in &mut self.subscribers {
             if !caught_up.contains(&conn.id) {
                 continue;
@@ -114,6 +118,9 @@ impl StateActor {
                 Err(mpsc::error::TrySendError::Full(_)) => conn.lagging = true,
                 Err(mpsc::error::TrySendError::Closed(_)) => {}
             }
+            if conn.watches_plan {
+                let _ = conn.tx.try_send(changed.clone());
+            }
         }
     }
 
@@ -122,30 +129,28 @@ impl StateActor {
         self.push(msg);
     }
 
-    /// Send the flat plan projection to the connections that asked for one.
+    /// Tell the connections that asked for a view that the plan changed.
     ///
-    /// Built **once** per plan change and cloned per watcher, not projected per connection:
-    /// the projection walks every MTU and formats every reason, and doing that n times for n
-    /// browser tabs would put the work on the actor that also feeds the 5 s telemetry stream.
+    /// A notice, not a payload. The client re-requests `get_view` with the window it is
+    /// actually showing; projecting here would mean this actor picking a window for everyone,
+    /// which is how a viewer asking for a week got a 35 h horizon pushed over it on every
+    /// replan (board-b0o). One mechanism: the request decides the window, the notice only
+    /// says when to ask again.
     ///
-    /// A withdrawn plan still pushes: an empty view is how a viewer learns to clear the chart
-    /// instead of drawing the plan it had a minute ago.
-    fn push_view(&mut self) {
-        if !self.subscribers.iter().any(|conn| conn.watches_view) {
+    /// A withdrawn plan still notifies: the empty reply is how a viewer learns to clear the
+    /// chart instead of drawing the plan it had a minute ago.
+    fn notify_plan_changed(&mut self) {
+        if !self.subscribers.iter().any(|conn| conn.watches_plan) {
             return;
         }
-        let now = jiff::Timestamp::now().as_second();
-        let view = View::of_plan(self.payload.plan.as_ref(), None, None, now);
-        let msg = ServerMsg::View { id: None, view };
-        for conn in self
-            .subscribers
-            .iter_mut()
-            .filter(|conn| conn.watches_view)
-        {
+        let msg = ServerMsg::PlanChanged {
+            computed_at: self.payload.plan.as_ref().map(|plan| plan.computed_at),
+        };
+        for conn in self.subscribers.iter_mut().filter(|conn| conn.watches_plan) {
             match conn.tx.try_send(msg.clone()) {
                 Ok(()) => {}
-                // A missed view costs one minute of freshness; the next plan change carries
-                // the whole horizon again, so nothing is lost by not queueing it.
+                // A missed notice costs one replan of staleness at most — and a connection
+                // that catches up is handed it again by `push`.
                 Err(mpsc::error::TrySendError::Full(_)) => {}
                 Err(mpsc::error::TrySendError::Closed(_)) => {}
             }
@@ -188,9 +193,9 @@ impl Message<Update> for StateActor {
                 // equality check — every plan carries its own `computed_at`.
                 self.payload.plan = plan.clone();
                 self.push(ServerMsg::Plan { plan });
-                // The same change in the browser's flat shape, for the connections that
-                // asked for it (board-zpe). Home Assistant never sees this frame.
-                self.push_view();
+                // Tell the browsers, not with a copy of the plan but with "ask again" — the
+                // client knows which window it is showing and this actor does not (board-zpe).
+                self.notify_plan_changed();
             }
         }
     }
@@ -210,7 +215,7 @@ impl Message<Subscribe> for StateActor {
             id,
             tx: msg.tx,
             lagging: false,
-            watches_view: false,
+            watches_plan: false,
         });
         eprintln!(
             "[state] conn {id} subscribed ({} open)",
@@ -240,18 +245,18 @@ impl Message<Unsubscribe> for StateActor {
     }
 }
 
-impl Message<WatchView> for StateActor {
+impl Message<WatchPlan> for StateActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        msg: WatchView,
+        msg: WatchPlan,
         _ctx: &mut kameo::prelude::Context<Self, Self::Reply>,
     ) -> Self::Reply {
         for conn in &mut self.subscribers {
-            if conn.id == msg.0 && !conn.watches_view {
-                conn.watches_view = true;
-                eprintln!("[state] conn {} watches the view", msg.0);
+            if conn.id == msg.0 && !conn.watches_plan {
+                conn.watches_plan = true;
+                eprintln!("[state] conn {} watches the plan", msg.0);
             }
         }
     }

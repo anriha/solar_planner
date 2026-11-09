@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>solar plan</title>
+    <!-- trunk builds the crate's binary for wasm32 and bundles the wasm-bindgen glue here -->
+    <link data-trunk rel="rust" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #121216;
+        overflow: hidden;
+      }
+      #the_canvas_id {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="the_canvas_id" tabindex="0"></canvas>
+  </body>
+</html>

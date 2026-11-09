@@ -6,8 +6,9 @@ use axum::{
         ConnectInfo, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode, header},
+    extract::Path as UrlPath,
+    response::{IntoResponse, Redirect, Response},
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -17,7 +18,7 @@ use crate::{
     bus::{BusActor, WriteRegister},
     directives::{ApplyDirective, Directives, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
-    state::{GetState, StateActor, Subscribe, Unsubscribe, WatchView},
+    state::{GetState, StateActor, Subscribe, Unsubscribe, WatchPlan},
     view::View,
 };
 
@@ -47,6 +48,14 @@ pub async fn serve(listener: tokio::net::TcpListener, app: AppState) -> anyhow::
         .route("/state", get(state_handler))
         .route("/meta", get(meta_handler))
         .route("/directives", get(directives_handler))
+        // The viewer: a static shell plus its wasm, same origin as the socket so there is no
+        // CORS and no mixed content (board-b0o).
+        .route("/", get(root_redirect))
+        // The viewer: a browser shell plus its wasm, served out of this binary's own memory
+        // (board-b0o). Same origin as the socket, so no CORS and no mixed content.
+        .route("/app", get(app_root))
+        .route("/app/", get(app_index))
+        .route("/app/{*path}", get(app_asset))
         .with_state(app);
     // Connect info powers the peer address in the connection log lines.
     axum::serve(
@@ -59,7 +68,7 @@ pub async fn serve(listener: tokio::net::TcpListener, app: AppState) -> anyhow::
 
 fn authorized(token: &str, headers: &HeaderMap, query: &HashMap<String, String>) -> bool {
     let header_ok = headers
-        .get(AUTHORIZATION)
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .is_some_and(|t| t == token);
@@ -217,6 +226,9 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
 /// Registering the watch comes **before** the reply is sent. A plan published in the gap
 /// between the two would otherwise never reach this connection, and the viewer would sit on
 /// a chart it has no way to refresh until it reconnects.
+///
+/// The watch is only an "ask again" notice ([`ServerMsg::PlanChanged`]): the window lives in
+/// the request, so it is always the client's own window that gets re-drawn.
 async fn view_reply(
     app: &AppState,
     conn_id: u64,
@@ -236,11 +248,57 @@ async fn view_reply(
             message: "state actor unavailable".into(),
         };
     };
-    let _ = app.state.tell(WatchView(conn_id)).send().await;
+    let _ = app.state.tell(WatchPlan(conn_id)).send().await;
     let now = jiff::Timestamp::now().as_second();
     ServerMsg::View {
-        id: Some(id),
+        id,
         view: View::of_plan(payload.plan.as_ref(), from, to, now),
+    }
+}
+
+/// `/` is the API root for nothing; send a browser that lands here to the viewer.
+async fn root_redirect() -> Redirect {
+    Redirect::temporary("/app/")
+}
+
+async fn app_root() -> Redirect {
+    Redirect::temporary("/app/")
+}
+
+async fn app_index() -> Response {
+    serve_asset("")
+}
+
+async fn app_asset(UrlPath(path): UrlPath<String>) -> Response {
+    serve_asset(&path)
+}
+
+/// Serve one embedded file.
+///
+/// The bundle is **not** behind the token, and that is deliberate: it carries no plant data, and
+/// a multi-megabyte wasm fetched with `?token=` puts the secret in Referer headers and proxy logs.
+/// Everything that does carry data (the socket) still requires it.
+///
+/// Hashed trunk filenames never change content, so they are cached hard; the html is not, because
+/// that is what points at the new hashes.
+fn serve_asset(path: &str) -> Response {
+    match crate::assets::get(path) {
+        Some((bytes, content_type)) => {
+            let cache = if content_type.starts_with("text/html") {
+                "no-cache"
+            } else {
+                "public, max-age=31536000, immutable"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CACHE_CONTROL, cache),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "no such asset\n").into_response(),
     }
 }
 

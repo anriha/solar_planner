@@ -296,9 +296,13 @@ fn one_step_plan() -> solar_controller::planner::Plan {
 }
 
 /// board-zpe over the real socket: one `get_view` serves the whole horizon in the flat shape,
-/// and the connection is subscribed to plan changes from then on — the push carries no `id`.
+/// and a plan change afterwards is a **notice**, not a second view.
+///
+/// The distinction is the whole point of board-b0o: a pushed view is projected with the
+/// server's default window, so a client showing a week had its chart reset to the horizon on
+/// every replan. A notice names the plan and lets the client ask for its own window.
 #[tokio::test]
-async fn get_view_answers_flat_and_then_pushes_on_every_replan() {
+async fn get_view_answers_flat_and_a_replan_only_announces_itself() {
     let (port, _dir, state) = setup_with(None).await;
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
         .await
@@ -328,29 +332,47 @@ async fn get_view_answers_flat_and_then_pushes_on_every_replan() {
     assert!(bad["message"].as_str().unwrap().contains("empty window"));
 
     state.ask(Update::Plan(Some(one_step_plan()))).await.unwrap();
-    let (mut saw_plan, mut saw_view) = (false, false);
+    let (mut saw_plan, mut notice) = (false, None);
     for _ in 0..2 {
         let m = recv_json(&mut ws).await;
         match m["type"].as_str() {
             Some("plan") => saw_plan = true,
-            Some("view") => {
-                saw_view = true;
-                assert!(m.get("id").is_none(), "a push carries no request id");
-                assert_eq!(m["view"]["steps"].as_array().unwrap().len(), 1);
-                // The bar is metered power; the command sits beside it as a marker.
-                assert_eq!(m["view"]["steps"][0]["ac_kw"], 7.94);
-                assert_eq!(m["view"]["steps"][0]["command_kw"], 8.4);
+            Some("plan_changed") => {
+                assert!(
+                    m.get("view").is_none(),
+                    "a plan change must not push a view: it would carry the server's window"
+                );
+                notice = m["computed_at"].as_i64();
             }
             other => panic!("unexpected message type: {other:?}"),
         }
     }
-    assert!(saw_plan && saw_view);
+    assert!(saw_plan, "the plan itself still goes out for HA");
+    assert_eq!(
+        notice,
+        Some(1_793_746_800),
+        "the notice names the plan it is about"
+    );
+
+    // The request is still the only way to get a view, and it is answered in full.
+    ws.send(Message::text(
+        json!({"type": "get_view", "id": "v3"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let reply = recv_json(&mut ws).await;
+    assert_eq!(reply["type"], "view");
+    assert_eq!(reply["id"], "v3");
+    assert_eq!(reply["view"]["steps"].as_array().unwrap().len(), 1);
+    // The bar is metered power; the command sits beside it as a marker.
+    assert_eq!(reply["view"]["steps"][0]["ac_kw"], 7.94);
+    assert_eq!(reply["view"]["steps"][0]["command_kw"], 8.4);
 }
 
-/// The view is a second copy of the plan in different clothes, and Home Assistant has no use
-/// for it: a connection that never asks for a view must never be sent one.
+/// The notice is only for browsers: Home Assistant never asks for a view, so it must never
+/// be told a plan changed (it is already reading the plan frame itself).
 #[tokio::test]
-async fn a_connection_that_never_asked_is_never_sent_a_view_push() {
+async fn a_connection_that_never_asked_is_never_sent_a_plan_change_notice() {
     let (port, _dir, state) = setup_with(None).await;
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
         .await
@@ -368,6 +390,58 @@ async fn a_connection_that_never_asked_is_never_sent_a_view_push() {
         tokio::time::timeout(Duration::from_millis(300), ws.next())
             .await
             .is_err(),
-        "a plan push was followed by a view frame this connection never asked for"
+        "a plan push was followed by a notice this connection never asked for"
+    );
+}
+
+/// board-b0o: the viewer is served from the same origin as the socket, out of the binary's own
+/// memory, and `/` sends a browser that lands there to it. The shell is not behind the token —
+/// only the data is. The body is either the embedded bundle or the build-time placeholder, so
+/// the assertion is on the shape (a page), not on the content of the build.
+///
+/// Raw HTTP over a TCP socket rather than an HTTP client: the Nix sandbox has no system CA
+/// bundle, and a client that insists on one cannot talk to a loopback plaintext server.
+#[tokio::test]
+async fn the_viewer_shell_is_served_and_root_redirects_to_it() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn get(port: u16, path: &str) -> (u16, String, String) {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("the bridge is listening");
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).await.unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .expect("a status line")
+            .parse()
+            .expect("a status code");
+        (status, head.to_string(), body.to_string())
+    }
+
+    let (port, _dir) = setup().await;
+
+    let (status, head, body) = get(port, "/app/").await;
+    assert_eq!(status, 200, "/app/ must serve the embedded index.html");
+    assert!(
+        head.to_lowercase().contains("content-type: text/html"),
+        "the page must arrive as html: {head}"
+    );
+    assert!(body.len() > 100, "the page is a real document");
+
+    let (status, head, _) = get(port, "/").await;
+    assert_eq!(status, 307);
+    assert!(
+        head.to_lowercase().contains("location: /app/"),
+        "root must redirect to the viewer: {head}"
     );
 }

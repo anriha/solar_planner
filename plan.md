@@ -107,6 +107,9 @@
 - **Block reads:** measured span layout from `plan_spans` @ MERGE_GAP=8: **12 FC03 spans** — (3–7) (20–21) (80) (99–162) (163–191) (209–220) (340) (500) (514–541) (555–558) (586–649) (650–679) — sensors ∪ control read-backs, gaps ≤8 dead regs bridged (99–162 and 163–191 are one 93-reg run chunked 64+29; without bridging it's 37 requests). 586–679 is 94 regs → chunked **≤64 regs per request**. Timing at 9600 8N1: ~1.15 ms/char, a 64-reg round-trip ≈ 200 ms incl. turnaround → 12 blocks ≈ 2–3 s per cycle. Fits the 5 s interval; don't go below 5 s without re-measuring.
 - **kameo `ask` flattens `Result` replies:** with `type Reply = Result<T, E>` you get `Result<T, SendError<M, E>>` — the handler's error arrives as `SendError::HandlerError(e)`, no nested match.
 - **axum `WebSocket::recv` exists only pre-split**; after `split()` use `StreamExt::next` / `SinkExt::send`.
+- **`std::time::Instant`/`SystemTime` panic on `wasm32-unknown-unknown`** (`library/std/src/sys/time/unsupported.rs`). The browser page comes up **completely blank** — no error on the page, only a console panic — because the viewer panics before its first frame. Use the `web-time` crate (same API over `performance.now()`) behind a target cfg; this cost a deploy to find.
+- **trunk writes absolute URLs by default** (`/viewer-….js`), which 404 when the bundle is served under `/app/` — again a blank page. `trunk build --public-url ./` (the `just web` recipe does this) keeps them relative.
+- **A headless Chromium screenshot is the fastest way to debug the wasm** — no browser on the host needed: `chromium --headless=new --no-sandbox --use-angle=swiftshader --enable-unsafe-swiftshader --enable-logging=stderr --virtual-time-budget=15000 --screenshot=shot.png 'http://…/app/?token=…'` prints the page's `console` (including Rust panics through `console_error_panic_hook`) and writes the frame.
 - **Internally-tagged wire enums need `rename_all = "snake_case"`** or tags serialize as variant names (`"Hello"`, not `"hello"`) — and deserialization of `"cmd"` silently falls into the error arm. Caught by the e2e test, not by the compiler.
 
 ## Crate pins (checked 2026-09-27, all alive)
@@ -254,6 +257,7 @@ custom_components/solar_bridge/plan_view.py   # DONE — plan -> runs + wording,
 custom_components/solar_bridge/calendar.py    # DONE — one calendar event per run
 tests/planner.rs  tests/plan_wire.rs          # DONE — planner through its actors, wire contract
 tests/view.rs                  # DONE — view projection + tests/fixtures/view.json pin
+viewer/                        # DONE — eframe/egui_plot viewer, native + wasm served at /app
 tests/test_plan_view.py                       # DONE — 13 stdlib tests, no HA install needed
 tests/decode.rs                # 11-vector contract — green
 tests/map_parse.rs             # 13 strict-loading tests — green
@@ -969,3 +973,82 @@ parsing `Plan`).
 
 `cargo test --all-targets` **201 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14
 passed**, clippy unchanged (three pre-existing lints), `nix build .#solar-bridge-arm` exit 0.
+
+### Phase 3a state (2026-11-09, fifteenth session) — the plan has a browser
+
+board-b0o: a new workspace member `viewer/`, one codebase with two targets. `cargo run -p viewer`
+opens a native window; `trunk build --release` produces `viewer/dist`, which **the bridge embeds
+into its own binary** (`build.rs` → `include_bytes!`) and serves from memory at `/app/`. The
+deployable artifact stays one file: a browser gets the wasm from the same origin that serves the
+socket, so there is no CORS, no mixed content, and no way for the UI and the payload it parses to
+be different versions.
+
+- **Renderer: eframe 0.37 + egui_plot 0.38 + ewebsock 0.8, glow (WebGL2) on both targets.** Not
+  wgpu: WebGPU still depends on browser flags on Linux Firefox, and this viewer has to open on
+  the machine it is used from. The three crates' pins are current (checked 2026-11-09).
+- **The root package stays the default member**, so `cargo build`, `cargo test` and the
+  aarch64-musl derivation are unchanged; the viewer builds only with `-p viewer` (or trunk).
+- **Five panels, linked by one x axis and one cursor**: sell/buy price lines, forecast PV area,
+  metered AC bars (`ac_kw`) with the DP's command as points and the reason in the bar label,
+  planned SOC (plus the measured line when the ledger exists), and the adherence strip, which
+  reports "no ledger yet" rather than a flat zero that would read as perfect adherence.
+- **The client repeats `hub.py`'s discipline**: a ping every 30 s, a reconnect after 90 s of
+  utter silence, backoff 5 s → 60 s resetting on open, and `get_view` on every (re)connect. A
+  bridge restart shows as "reconnecting" within seconds, not as a frozen chart.
+- **Wire side**: `/app/{*path}` is answered out of the embedded table with the right content
+  types (`application/wasm`), hashed assets cached `immutable` and the html `no-cache`; `/`
+  redirects to `/app/`. The shell is **not** behind the token — only the data is, so a
+  multi-megabyte wasm never carries `?token=` into a Referer or a proxy log. A checkout built
+  without `viewer/dist` embeds a placeholder page that says to run `just web`, instead of
+  failing the build or 404ing.
+- **Deploy is one file again, and the bundle is built in Nix**: `packages.wasm` compiles the
+  viewer for wasm32, runs `wasm-bindgen` and `wasm-opt -Oz` (4 524 727 B), and both binaries
+  copy that `dist/` into `viewer/dist` in `preBuild` before cargo runs. Nothing is fetched at
+  build time: the CLI comes from `pkgs.wasm-bindgen-cli_0_2_126`, and the viewer's
+  `wasm-bindgen`/`futures`/`js-sys`/`web-sys` family is pinned to 0.2.126 to match it — the
+  lock had resolved 0.2.130, which nixpkgs does not carry. The native binary went 12.25 MB →
+  17.76 MB; `nix build .#default` and `.#solar-bridge-arm` both embed the same bundle, and the
+  binary answers `/app/` 200, `viewer_bg.wasm` 200 `application/wasm` from memory.
+- **Verified**: `cargo test --all-targets` **202 passed / 0 failed / 3 ignored**; `cargo test -p
+  viewer` **11 passed**, including two headless frames of the whole window (with the pinned view
+  and with none) so a plot item that panics on real data fails in CI rather than in a browser;
+  `trunk build --release` green, **4.5 MB wasm + 84 KB js**; the real binary with `static_dir`
+  pointing at the real dist answered `/app/` 200 (1 307 B html), the wasm 200 (4 565 429 B) and
+  `/` 307 → `/app/`.
+- **Devshell**: the native toolchain now carries `wasm32-unknown-unknown` and `trunk`;
+  wasm-bindgen-cli is still downloaded by trunk at build time, which is board-fcg's job to pin.
+- **Found while smoke-testing, not fixed**: `/state`, `/meta` and `/directives` answer **without
+  the token**; only `/ws` checks it. Nothing in the HA integration uses those endpoints (the hub
+  is WS-only), so they are debug surface — but they are open on `0.0.0.0:8300`.
+
+### Phase 3a state (2026-11-09, seventeenth session) — a plan change is announced, not pushed
+
+The transport correction after the fifteenth session: the viewer's data path is one mechanism
+instead of two. Until now `StateActor::push_view` projected the plan **once per plan change** with
+the default window and cloned the frame to every watcher. That was only sound while every watcher
+wanted the same window; a viewer asking for a week would have had its chart reset to the 35 h
+horizon on every replan, silently, once a minute.
+
+- **`ServerMsg::PlanChanged { computed_at }` replaces the pushed `View`.** It carries no payload:
+  the client re-requests `get_view` with the window it is actually showing. `View` is now always a
+  reply to a `get_view` and its `id` is required (`Option` was only ever `None` on the push).
+  A withdrawal still notifies (`computed_at: null`), so a viewer clears instead of drawing the
+  plan it had a minute ago.
+- **Window ownership is explicit and tested.** The request decides the window; the notice only
+  says when to ask again. `WatchPlan` (was `WatchView`) still gates the notice to connections that
+  have asked at least once, so Home Assistant never receives it — pinned by
+  `a_connection_that_never_asked_is_never_sent_a_plan_change_notice`.
+- **The catch-up path repairs notices too.** A watcher that fell behind gets `Plan` and now also
+  `PlanChanged` at the `lagging` → `live` transition; otherwise it would sit one replan stale.
+- **Client side (`viewer/src/link.rs`)**: the window lives on the client, one request is in flight
+  at a time, a notice arriving mid-flight is coalesced (`dirty`) and re-requested on the reply, and
+  a notice whose `computed_at` the client is already showing costs no round trip. Request ids are
+  now a counter (`v0`, `v1`, …) rather than a constant, so a stale reply is visible in a log.
+- **Verified**: root suite **205 passed / 0 failed / 3 ignored** (`tests/server.rs` 9/9, including
+  the rewritten `get_view_answers_flat_and_a_replan_only_announces_itself`), viewer **12 passed**
+  (new `a_plan_change_notice_carries_no_view`), `cargo clippy --all-targets` clean under the flake
+  devshell, `cargo check -p viewer --target wasm32-unknown-unknown` green, `nix build .#wasm` green,
+  and `viewer/dist` refreshed from that build so a local `cargo run` serves the current bundle.
+- **Still open**: `/state`, `/meta` and `/directives` answer without the token (fifteenth session
+  note); the ledger (`board-aru`) is what will make `get_view` answer anything older than the
+  current horizon.
