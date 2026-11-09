@@ -14,8 +14,6 @@ pub struct Config {
     #[serde(default = "default_directives_path")]
     pub directives_path: String,
     /// Where the history day files live (one `YYYY-MM-DD.jsonl` per Prague day).
-    #[serde(default = "default_history_dir")]
-    pub history_dir: String,
     /// forecast.solar site geometry; defaults match the installed array.
     #[serde(default)]
     pub site: SiteConfig,
@@ -23,10 +21,6 @@ pub struct Config {
 
 fn default_directives_path() -> String {
     "directives.json".to_string()
-}
-
-fn default_history_dir() -> String {
-    "history".to_string()
 }
 
 /// The array, as forecast.solar needs it. Boot config: the panels do not move.
@@ -65,7 +59,6 @@ impl Default for Config {
             bind: "0.0.0.0:8300".to_string(),
             token: String::new(),
             directives_path: default_directives_path(),
-            history_dir: default_history_dir(),
             site: SiteConfig::default(),
         }
     }

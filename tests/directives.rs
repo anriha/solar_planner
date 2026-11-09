@@ -1,5 +1,7 @@
 use serde_json::json;
-use solar_controller::directives::{ApplyError, Directives, Percent, Price, directive_schema, load, save};
+use solar_controller::directives::{
+    ApplyError, Directives, Percent, Price, directive_schema, load, save,
+};
 
 #[test]
 fn defaults_are_the_phase_3a_tuning() {
@@ -10,7 +12,10 @@ fn defaults_are_the_phase_3a_tuning() {
         !d.actuator_enabled,
         "the planner must be able to run without owning the registers"
     );
-    assert!(!d.disarm, "a fresh deploy is armed by the switch, not disarmed");
+    assert!(
+        !d.disarm,
+        "a fresh deploy is armed by the switch, not disarmed"
+    );
     assert_eq!(d.soc_floor, Percent::try_from(20.0).unwrap());
     assert_eq!(d.soc_ceiling, Percent::try_from(80.0).unwrap());
     assert_eq!(d.max_power_kw, 12.0);
@@ -19,6 +24,7 @@ fn defaults_are_the_phase_3a_tuning() {
         "the rate knobs start at the pack's rated 200 A"
     );
     assert_eq!(d.battery_charge_kw, 10.24);
+    assert_eq!(d.buy_vat_pct, Percent::try_from(21.0).unwrap());
     assert_eq!(d.buy_distribution_czk, Price::try_from(2.515).unwrap());
     assert_eq!(d.buy_seller_fee_czk, Price::try_from(0.3).unwrap());
     assert_eq!(d.sell_fee_czk, Price::try_from(0.5).unwrap());
@@ -38,6 +44,7 @@ fn apply_each_directive_and_bump_version() {
     assert!(d.apply("max_power_kw", json!(10.0)).unwrap());
     assert!(d.apply("battery_discharge_kw", json!(6.144)).unwrap());
     assert!(d.apply("battery_charge_kw", json!(6.144)).unwrap());
+    assert!(d.apply("buy_vat_pct", json!(12.0)).unwrap());
     assert!(d.apply("buy_distribution_czk", json!(2.4)).unwrap());
     assert!(d.apply("buy_seller_fee_czk", json!(0.35)).unwrap());
     assert!(d.apply("sell_fee_czk", json!(0.75)).unwrap());
@@ -53,13 +60,14 @@ fn apply_each_directive_and_bump_version() {
     assert_eq!(d.max_power_kw, 10.0);
     assert_eq!(d.battery_discharge_kw, 6.144);
     assert_eq!(d.battery_charge_kw, 6.144);
+    assert_eq!(d.buy_vat_pct.get(), 12.0);
     assert_eq!(d.buy_distribution_czk.get(), 2.4);
     assert_eq!(d.buy_seller_fee_czk.get(), 0.35);
     assert_eq!(d.sell_fee_czk.get(), 0.75);
     assert_eq!(d.forecast_calibration, 0.45);
     assert_eq!(d.energy_step_kwh, 0.4);
     assert_eq!(d.action_step_kw, 1.0);
-    assert_eq!(d.version, 14);
+    assert_eq!(d.version, 15);
 }
 
 #[test]
@@ -146,6 +154,8 @@ fn numbers_outside_their_range_are_rejected_not_clamped() {
         ("battery_discharge_kw", json!(10.25)),
         ("battery_charge_kw", json!(0.1)),
         ("battery_charge_kw", json!(10.25)),
+        ("buy_vat_pct", json!(100.1)),
+        ("buy_vat_pct", json!(-0.5)),
         ("buy_distribution_czk", json!(10_001.0)),
         ("buy_distribution_czk", json!(-0.5)),
         ("buy_seller_fee_czk", json!(10_001.0)),
@@ -157,7 +167,10 @@ fn numbers_outside_their_range_are_rejected_not_clamped() {
         ("action_step_kw", json!(0.05)),
     ] {
         assert!(
-            matches!(d.apply(name, value.clone()), Err(ApplyError::Invalid { .. })),
+            matches!(
+                d.apply(name, value.clone()),
+                Err(ApplyError::Invalid { .. })
+            ),
             "{name} accepted {value}"
         );
     }
@@ -206,7 +219,10 @@ fn a_file_written_before_the_switch_existed_loads_disabled() {
     let loaded = load(&path).unwrap().expect("a legacy file still loads");
     assert_eq!(loaded.version, 3);
     assert_eq!(loaded.soc_floor.get(), 25.0);
-    assert!(!loaded.actuator_enabled, "an upgraded deploy stays read-only");
+    assert!(
+        !loaded.actuator_enabled,
+        "an upgraded deploy stays read-only"
+    );
     assert!(!loaded.disarm);
     assert_eq!(
         loaded.battery_discharge_kw, 10.24,
@@ -233,17 +249,30 @@ fn the_retired_flat_tariff_is_dropped_and_the_spot_charges_default() {
     .unwrap();
 
     let loaded = load(&path).unwrap().expect("a pre-spot file still loads");
+    assert_eq!(
+        loaded.buy_vat_pct.get(),
+        21.0,
+        "a file without the VAT knob must load the tax, not 0 %"
+    );
     assert_eq!(loaded.buy_distribution_czk.get(), 2.515);
     assert_eq!(loaded.buy_seller_fee_czk.get(), 0.3);
-    assert_eq!(loaded.sell_fee_czk.get(), 0.75, "the sell fee is its own field");
+    assert_eq!(
+        loaded.sell_fee_czk.get(),
+        0.75,
+        "the sell fee is its own field"
+    );
     assert_eq!(loaded.version, 4, "a migrated load is not an edit");
     assert!(loaded.actuator_enabled, "the migration preserves the rest");
 
     // The next save writes the new shape and no retired key.
     save(&path, &loaded).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(!raw.contains("buy_price_czk"), "the retired key is not re-written");
+    assert!(
+        !raw.contains("buy_price_czk"),
+        "the retired key is not re-written"
+    );
     assert!(raw.contains("buy_distribution_czk"));
+    assert!(raw.contains("buy_vat_pct"));
 }
 
 #[test]
@@ -258,7 +287,10 @@ fn other_unknown_fields_are_still_a_loud_error() {
             "typo_field":true}"#,
     )
     .unwrap();
-    assert!(load(&path).is_err(), "only force_mode and buy_price_czk are migrated");
+    assert!(
+        load(&path).is_err(),
+        "only force_mode and buy_price_czk are migrated"
+    );
 }
 
 #[test]
@@ -272,7 +304,7 @@ fn corrupt_file_is_a_loud_error() {
 #[test]
 fn directive_schema_matches_frozen_contract() {
     // serde emits internally-tagged variants with alphabetically sorted keys
-    // (content buffering), so compare parsed JSON, not bytes. The first fourteen entries
+    // (content buffering), so compare parsed JSON, not bytes. The first fifteen entries
     // are the policy scalars; the rest are the four curves in CURVE_NAMES order, five
     // points × (power, efficiency) each.
     let actual: serde_json::Value =
@@ -287,6 +319,7 @@ fn directive_schema_matches_frozen_contract() {
             {"max":30.0,"min":0.5,"name":"max_power_kw","nullable":false,"type":"number","unit":"kW"},
             {"label":"Battery discharge limit","max":10.24,"min":0.5,"name":"battery_discharge_kw","nullable":false,"step":0.1,"type":"number","unit":"kW"},
             {"label":"Battery charge limit","max":10.24,"min":0.5,"name":"battery_charge_kw","nullable":false,"step":0.1,"type":"number","unit":"kW"},
+            {"max":100.0,"min":0.0,"name":"buy_vat_pct","nullable":false,"step":0.1,"type":"number","unit":"%"},
             {"max":10000.0,"min":0.0,"name":"buy_distribution_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
             {"max":10000.0,"min":0.0,"name":"buy_seller_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
             {"max":10000.0,"min":0.0,"name":"sell_fee_czk","nullable":false,"step":0.001,"type":"number","unit":"CZK/kWh"},
@@ -357,29 +390,38 @@ fn defaults_are_the_measured_path_curves() {
     assert_curve(
         d.pv_to_battery.fractions(),
         &[
-            (0.5, 0.87),
-            (1.5, 0.87),
-            (3.0, 0.928),
-            (6.0, 0.943),
-            (10.0, 0.947),
+            (0.94, 0.927),
+            (2.33, 0.929),
+            (3.83, 0.922),
+            (6.55, 0.907),
+            (10.1, 0.888),
         ],
     );
-    assert_curve(d.pv_to_grid.fractions(), &[(2.0, 0.97), (10.0, 0.976)]);
+    assert_curve(
+        d.pv_to_grid.fractions(),
+        &[(4.18, 0.983), (6.55, 0.977), (10.26, 0.975)],
+    );
     assert_curve(
         d.battery_to_grid.fractions(),
-        &[(0.5, 0.939), (3.0, 0.939), (6.0, 0.96), (10.24, 0.969)],
+        &[(4.84, 0.959), (6.34, 0.949), (9.55, 0.928)],
     );
-    assert_curve(d.grid_to_battery.fractions(), &[(1.0, 0.95), (9.472, 0.95)]);
+    assert_curve(
+        d.grid_to_battery.fractions(),
+        &[(2.17, 0.928), (8.32, 0.89)],
+    );
 }
 
 #[test]
 fn a_curve_point_is_edited_in_place() {
     let mut d = Directives::default();
     let version = d.version;
-    assert!(d.apply("pv_to_battery_p3_pct", json!(93.5)).unwrap());
-    assert_eq!(d.pv_to_battery.points[2].pct, 93.5);
-    assert_eq!(d.pv_to_battery.points[2].kw, 3.0, "power untouched");
-    assert_eq!(d.pv_to_battery.points[0].pct, 87.0, "other points untouched");
+    assert!(d.apply("pv_to_battery_p3_pct", json!(91.5)).unwrap());
+    assert_eq!(d.pv_to_battery.points[2].pct, 91.5);
+    assert_eq!(d.pv_to_battery.points[2].kw, 3.83, "power untouched");
+    assert_eq!(
+        d.pv_to_battery.points[0].pct, 92.7,
+        "other points untouched"
+    );
     assert_eq!(d.version, version + 1);
 }
 
@@ -388,13 +430,13 @@ fn curve_points_must_ascend_by_power() {
     let mut d = Directives::default();
     let error = d
         .apply("pv_to_battery_p2_kw", json!(0.4))
-        .expect_err("0.4 kW cannot sit above the 0.5 kW point");
+        .expect_err("0.4 kW cannot sit above the 0.94 kW point");
     assert!(
         error.to_string().contains("must be above slot 1"),
         "{error}"
     );
     assert_eq!(
-        d.pv_to_battery.points[1].kw, 1.5,
+        d.pv_to_battery.points[1].kw, 2.33,
         "a rejected edit changes nothing"
     );
 }
@@ -403,8 +445,9 @@ fn curve_points_must_ascend_by_power() {
 fn a_zero_efficiency_disables_a_slot() {
     let mut d = Directives::default();
     assert!(d.apply("pv_to_grid_p2_pct", json!(0.0)).unwrap());
-    assert_eq!(d.pv_to_grid.active().count(), 1);
-    assert_curve(d.pv_to_grid.fractions(), &[(2.0, 0.97)]);
+    assert_eq!(d.pv_to_grid.active().count(), 2);
+    assert_curve(d.pv_to_grid.fractions(), &[(4.18, 0.983), (10.26, 0.975)]);
+    assert!(d.apply("pv_to_grid_p3_pct", json!(0.0)).unwrap());
 
     // The last active point cannot be switched off: a path without points is not a curve.
     assert!(d.apply("pv_to_grid_p1_pct", json!(0.0)).is_err());
@@ -420,7 +463,7 @@ fn curve_efficiency_outside_fifty_to_hundred_is_rejected() {
         );
     }
     assert_eq!(
-        d.pv_to_battery.points[0].pct, 87.0,
+        d.pv_to_battery.points[0].pct, 92.7,
         "nothing was clamped in"
     );
 }
@@ -429,7 +472,7 @@ fn curve_efficiency_outside_fifty_to_hundred_is_rejected() {
 fn a_no_op_curve_edit_does_not_bump_the_version() {
     let mut d = Directives::default();
     let version = d.version;
-    assert!(!d.apply("pv_to_battery_p1_kw", json!(0.5)).unwrap());
+    assert!(!d.apply("pv_to_battery_p1_kw", json!(0.94)).unwrap());
     assert_eq!(d.version, version);
 }
 
@@ -450,16 +493,16 @@ fn a_file_without_curves_gains_the_measured_defaults() {
     assert_curve(
         loaded.pv_to_battery.fractions(),
         &[
-            (0.5, 0.87),
-            (1.5, 0.87),
-            (3.0, 0.928),
-            (6.0, 0.943),
-            (10.0, 0.947),
+            (0.94, 0.927),
+            (2.33, 0.929),
+            (3.83, 0.922),
+            (6.55, 0.907),
+            (10.1, 0.888),
         ],
     );
     assert_curve(
         loaded.grid_to_battery.fractions(),
-        &[(1.0, 0.95), (9.472, 0.95)],
+        &[(2.17, 0.928), (8.32, 0.89)],
     );
 }
 
@@ -487,4 +530,3 @@ fn every_wire_key_has_a_schema_entry() {
         "the curve is flattened on the wire, never nested"
     );
 }
-

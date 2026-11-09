@@ -131,11 +131,23 @@ macro_rules! scalar_unit {
     };
 }
 
-scalar_unit!(AcKw, "AC power in kilowatts — the inverter terminal, the load, the meter.");
-scalar_unit!(DcKw, "DC power in kilowatts — the array, or the pack terminals.");
-scalar_unit!(AcKwh, "AC energy in kilowatt-hours — what the meter bills and pays for.");
+scalar_unit!(
+    AcKw,
+    "AC power in kilowatts — the inverter terminal, the load, the meter."
+);
+scalar_unit!(
+    DcKw,
+    "DC power in kilowatts — the array, or the pack terminals."
+);
+scalar_unit!(
+    AcKwh,
+    "AC energy in kilowatt-hours — what the meter bills and pays for."
+);
 scalar_unit!(DcKwh, "DC energy in kilowatt-hours — what the pack stores.");
-scalar_unit!(Hours, "A duration in hours — 0.25 for a fifteen-minute MTU.");
+scalar_unit!(
+    Hours,
+    "A duration in hours — 0.25 for a fifteen-minute MTU."
+);
 scalar_unit!(Czk, "Money in Czech koruna.");
 scalar_unit!(CzkPerKwh, "A price in CZK per AC kilowatt-hour.");
 
@@ -233,15 +245,40 @@ mod tests {
 
     #[test]
     fn power_times_duration_is_energy_in_the_same_domain() {
-        assert!((AcKw::new(2.0) * Hours::new(0.25) - AcKwh::new(0.5)).abs().get() < 1e-12);
-        assert!((DcKw::new(2.0) * Hours::new(0.25) - DcKwh::new(0.5)).abs().get() < 1e-12);
-        assert!((Hours::new(0.25) * DcKw::new(2.0) - DcKwh::new(0.5)).abs().get() < 1e-12);
+        assert!(
+            (AcKw::new(2.0) * Hours::new(0.25) - AcKwh::new(0.5))
+                .abs()
+                .get()
+                < 1e-12
+        );
+        assert!(
+            (DcKw::new(2.0) * Hours::new(0.25) - DcKwh::new(0.5))
+                .abs()
+                .get()
+                < 1e-12
+        );
+        assert!(
+            (Hours::new(0.25) * DcKw::new(2.0) - DcKwh::new(0.5))
+                .abs()
+                .get()
+                < 1e-12
+        );
     }
 
     #[test]
     fn energy_over_duration_is_power_in_the_same_domain() {
-        assert!((AcKwh::new(0.5) / Hours::new(0.25) - AcKw::new(2.0)).abs().get() < 1e-12);
-        assert!((DcKwh::new(0.5) / Hours::new(0.25) - DcKw::new(2.0)).abs().get() < 1e-12);
+        assert!(
+            (AcKwh::new(0.5) / Hours::new(0.25) - AcKw::new(2.0))
+                .abs()
+                .get()
+                < 1e-12
+        );
+        assert!(
+            (DcKwh::new(0.5) / Hours::new(0.25) - DcKw::new(2.0))
+                .abs()
+                .get()
+                < 1e-12
+        );
     }
 
     #[test]

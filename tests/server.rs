@@ -9,11 +9,9 @@ use kameo::actor::{ActorRef, Spawn};
 use serde_json::{Value as Json, json};
 use solar_controller::bus::{BusActor, LinkConfig};
 use solar_controller::directives::{Directives, DirectivesActor};
-use solar_controller::ledger;
 use solar_controller::map::{EMBEDDED_MAP, load_from_str};
 use solar_controller::server::{AppState, serve};
 use solar_controller::state::{StateActor, Update};
-use solar_controller::store::{StoreActor, StoreConfig};
 use solar_controller::telemetry::Snapshot;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -52,16 +50,11 @@ async fn setup_with(initial: Option<Json>) -> (u16, tempfile::TempDir, ActorRef<
         Duration::from_secs(5),
         state.clone(),
     ));
-    let store = StoreActor::spawn(StoreActor::new(
-        StoreConfig::new(dir.path().join("history")).unwrap(),
-    ));
-    let ledger = ledger::spawn(state.clone(), store).await.unwrap();
     let app = AppState {
         meta,
         state: state.clone(),
         directives,
         bus,
-        ledger,
         token: "test-token".into(),
     };
 
@@ -129,10 +122,9 @@ async fn hello_ping_cmd_ack_push_and_persistence() {
     assert!(saw_ack && saw_state);
 
     // persisted exactly as acked
-    let persisted: Json = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join("directives.json")).unwrap(),
-    )
-    .unwrap();
+    let persisted: Json =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("directives.json")).unwrap())
+            .unwrap();
     assert_eq!(persisted["disarm"], true);
     assert_eq!(persisted["version"], 1);
 }
@@ -271,8 +263,8 @@ async fn write_valid_control_surfaces_bus_connect_failure() {
     assert!(m["error"].as_str().unwrap().contains("connect"));
 }
 
-/// 2026-11-04T00:00 Prague; one export MTU is enough — these tests are about the view frame,
-/// not the plan.
+/// 2026-11-04T00:00 Prague; one export MTU is enough — these tests are about `/plan.json`,
+/// not the plan's contents.
 fn one_step_plan() -> solar_controller::planner::Plan {
     use solar_controller::planner::{Action, Mtu, Plan, PlanStep, Reason};
     use solar_controller::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours};
@@ -302,114 +294,13 @@ fn one_step_plan() -> solar_controller::planner::Plan {
     }
 }
 
-/// board-zpe over the real socket: one `get_view` serves the whole horizon in the flat shape,
-/// and a plan change afterwards is a **notice**, not a second view.
-///
-/// The distinction is the whole point of board-b0o: a pushed view is projected with the
-/// server's default window, so a client showing a week had its chart reset to the horizon on
-/// every replan. A notice names the plan and lets the client ask for its own window.
+/// 2026-11-09 decision: Grafana is the only surface, so the bridge must serve the two things
+/// a dashboard cannot get from Home Assistant — the metrics family (prices, forecast, plan)
+/// and the horizon itself. Both are pure views of the state actor: a scrape never moves the
+/// plant, and `/plan.json` is the flat projection of the plan.
 #[tokio::test]
-async fn get_view_answers_flat_and_a_replan_only_announces_itself() {
-    let (port, _dir, state) = setup_with(None).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
-        .await
-        .unwrap();
-    let _ = recv_json(&mut ws).await; // hello
-
-    // No plan published yet: the reply is still a well-formed, empty view.
-    ws.send(Message::text(
-        json!({"type": "get_view", "id": "v1"}).to_string(),
-    ))
-    .await
-    .unwrap();
-    let reply = recv_json(&mut ws).await;
-    assert_eq!(reply["type"], "view");
-    assert_eq!(reply["id"], "v1");
-    assert!(reply["view"]["computed_at"].is_null());
-    assert_eq!(reply["view"]["steps"].as_array().unwrap().len(), 0);
-
-    // An empty window is a client error, not an empty chart to be mistaken for "no plan".
-    ws.send(Message::text(
-        json!({"type": "get_view", "id": "v2", "from": 10, "to": 10}).to_string(),
-    ))
-    .await
-    .unwrap();
-    let bad = recv_json(&mut ws).await;
-    assert_eq!(bad["type"], "error");
-    assert!(bad["message"].as_str().unwrap().contains("empty window"));
-
-    state.ask(Update::Plan(Some(one_step_plan()))).await.unwrap();
-    let (mut saw_plan, mut notice) = (false, None);
-    for _ in 0..2 {
-        let m = recv_json(&mut ws).await;
-        match m["type"].as_str() {
-            Some("plan") => saw_plan = true,
-            Some("plan_changed") => {
-                assert!(
-                    m.get("view").is_none(),
-                    "a plan change must not push a view: it would carry the server's window"
-                );
-                notice = m["computed_at"].as_i64();
-            }
-            other => panic!("unexpected message type: {other:?}"),
-        }
-    }
-    assert!(saw_plan, "the plan itself still goes out for HA");
-    assert_eq!(
-        notice,
-        Some(1_793_746_800),
-        "the notice names the plan it is about"
-    );
-
-    // The request is still the only way to get a view, and it is answered in full.
-    ws.send(Message::text(
-        json!({"type": "get_view", "id": "v3"}).to_string(),
-    ))
-    .await
-    .unwrap();
-    let reply = recv_json(&mut ws).await;
-    assert_eq!(reply["type"], "view");
-    assert_eq!(reply["id"], "v3");
-    assert_eq!(reply["view"]["steps"].as_array().unwrap().len(), 1);
-    // The bar is metered power; the command sits beside it as a marker.
-    assert_eq!(reply["view"]["steps"][0]["ac_kw"], 7.94);
-    assert_eq!(reply["view"]["steps"][0]["command_kw"], 8.4);
-}
-
-/// The notice is only for browsers: Home Assistant never asks for a view, so it must never
-/// be told a plan changed (it is already reading the plan frame itself).
-#[tokio::test]
-async fn a_connection_that_never_asked_is_never_sent_a_plan_change_notice() {
-    let (port, _dir, state) = setup_with(None).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws?token=test-token"))
-        .await
-        .unwrap();
-    let _ = recv_json(&mut ws).await; // hello
-    // A pong proves the subscription is registered (see the other tests).
-    ws.send(Message::text(json!({"type": "ping"}).to_string()))
-        .await
-        .unwrap();
-    assert_eq!(recv_json(&mut ws).await["type"], "pong");
-
-    state.ask(Update::Plan(Some(one_step_plan()))).await.unwrap();
-    assert_eq!(recv_json(&mut ws).await["type"], "plan");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), ws.next())
-            .await
-            .is_err(),
-        "a plan push was followed by a notice this connection never asked for"
-    );
-}
-
-/// board-b0o: the viewer is served from the same origin as the socket, out of the binary's own
-/// memory, and `/` sends a browser that lands there to it. The shell is not behind the token —
-/// only the data is. The body is either the embedded bundle or the build-time placeholder, so
-/// the assertion is on the shape (a page), not on the content of the build.
-///
-/// Raw HTTP over a TCP socket rather than an HTTP client: the Nix sandbox has no system CA
-/// bundle, and a client that insists on one cannot talk to a loopback plaintext server.
-#[tokio::test]
-async fn the_viewer_shell_is_served_and_root_redirects_to_it() {
+async fn metrics_and_plan_json_are_views_of_the_same_state() {
+    use solar_controller::decode::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn get(port: u16, path: &str) -> (u16, String, String) {
@@ -435,20 +326,61 @@ async fn the_viewer_shell_is_served_and_root_redirects_to_it() {
         (status, head.to_string(), body.to_string())
     }
 
-    let (port, _dir) = setup().await;
+    let (port, _dir, state) = setup_with(None).await;
 
-    let (status, head, body) = get(port, "/app/").await;
-    assert_eq!(status, 200, "/app/ must serve the embedded index.html");
-    assert!(
-        head.to_lowercase().contains("content-type: text/html"),
-        "the page must arrive as html: {head}"
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("pv_energy_total".to_string(), Value::Number(1112.1));
+    values.insert(
+        "grid_internal_power_total".to_string(),
+        Value::Number(-8650.0),
     );
-    assert!(body.len() > 100, "the page is a real document");
+    state
+        .ask(Update::Good(Snapshot {
+            link_ok: true,
+            ts: 1_793_746_800,
+            values,
+        }))
+        .await
+        .unwrap();
+    state
+        .ask(Update::Plan(Some(one_step_plan())))
+        .await
+        .unwrap();
 
-    let (status, head, _) = get(port, "/").await;
-    assert_eq!(status, 307);
+    let (status, head, body) = get(port, "/metrics").await;
+    assert_eq!(status, 200);
     assert!(
-        head.to_lowercase().contains("location: /app/"),
-        "root must redirect to the viewer: {head}"
+        head.to_lowercase()
+            .contains("content-type: text/plain; version=0.0.4"),
+        "Prometheus needs the exposition format in the type: {head}"
+    );
+    assert!(body.contains("# TYPE solar_pv_energy_kwh_total counter"));
+    assert!(body.contains("solar_pv_energy_kwh_total 1112.1"));
+    // The meter keeps its own sign; the plan's export-positive convention stays a planner
+    // internal.
+    assert!(body.contains("solar_grid_power_w -8650"));
+    // A plan in the past still reports its age and its expected money, but no "in force"
+    // price: a stale plan must not masquerade as the current one.
+    assert!(body.contains("solar_plan_net_czk_horizon 15.68"));
+    assert!(!body.contains("solar_price_sell_czk_per_kwh"));
+
+    let (status, head, body) = get(port, "/plan.json").await;
+    assert_eq!(status, 200);
+    assert!(
+        head.to_lowercase()
+            .contains("content-type: application/json"),
+        "the horizon is a JSON document: {head}"
+    );
+    let view: Json = serde_json::from_str(&body).expect("/plan.json is JSON");
+    assert_eq!(view["steps"][0]["price_sell"], 7.9);
+    assert_eq!(view["steps"][0]["command_kw"], 8.4);
+    assert_eq!(view["steps"][0]["kind"], "export");
+    assert!(
+        view.get("adherence").is_none(),
+        "the payload is the plan alone: the measured side lives in Prometheus"
+    );
+    assert!(
+        view["computed_at"].is_i64(),
+        "the plan's own age rides the payload so a dashboard can say how stale it is"
     );
 }

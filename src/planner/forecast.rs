@@ -221,9 +221,21 @@ mod tests {
     fn spreads_each_published_hour_over_four_mtus() {
         let points = parse_estimate(ESTIMATE_BODY).expect("the captured body parses");
 
-        assert_eq!(points.len(), 12, "three published hours, four quarters each");
-        assert_eq!(points[0].mtu.start, HOUR_8 - 3600, "the 07:00 hour comes first");
-        assert!(points.windows(2).all(|w| w[1].mtu.start - w[0].mtu.start == 900));
+        assert_eq!(
+            points.len(),
+            12,
+            "three published hours, four quarters each"
+        );
+        assert_eq!(
+            points[0].mtu.start,
+            HOUR_8 - 3600,
+            "the 07:00 hour comes first"
+        );
+        assert!(
+            points
+                .windows(2)
+                .all(|w| w[1].mtu.start - w[0].mtu.start == 900)
+        );
 
         let eight = points
             .iter()

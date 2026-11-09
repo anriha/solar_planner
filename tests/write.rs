@@ -2,10 +2,16 @@ use serde_json::json;
 use solar_controller::{
     bus::{WriteError, encode_write, encode_write_masked},
     decode::{DecodeError, Field, decode_field},
-    map::{Constraint, ControlDef, Encoding, EMBEDDED_MAP, load_from_str},
+    map::{Constraint, ControlDef, EMBEDDED_MAP, Encoding, load_from_str},
 };
 
-fn def(name: &str, encoding: Encoding, scale: f64, offset: f64, constraint: Constraint) -> ControlDef {
+fn def(
+    name: &str,
+    encoding: Encoding,
+    scale: f64,
+    offset: f64,
+    constraint: Constraint,
+) -> ControlDef {
     ControlDef {
         name: name.into(),
         address: 100,
@@ -25,7 +31,11 @@ fn switch_maps_bool_to_on_off_raws() {
         Encoding::U16,
         1.0,
         0.0,
-        Constraint::Switch { on: 1, off: 0, bitmask: None },
+        Constraint::Switch {
+            on: 1,
+            off: 0,
+            bitmask: None,
+        },
     );
     assert_eq!(encode_write(&d, &json!(true)).unwrap(), 1);
     assert_eq!(encode_write(&d, &json!(false)).unwrap(), 0);
@@ -107,8 +117,14 @@ fn select_takes_option_value_not_label() {
         0.0,
         Constraint::Select {
             options: vec![
-                solar_controller::map::EnumOptions { value: 0, label: "generator".into() },
-                solar_controller::map::EnumOptions { value: 2, label: "micro_inverter".into() },
+                solar_controller::map::EnumOptions {
+                    value: 0,
+                    label: "generator".into(),
+                },
+                solar_controller::map::EnumOptions {
+                    value: 2,
+                    label: "micro_inverter".into(),
+                },
             ],
         },
     );
@@ -126,7 +142,11 @@ fn number_rejects_out_of_range_never_clamps() {
         Encoding::U16,
         1.0,
         0.0,
-        Constraint::Number { min: 0.0, max: 16000.0, step: Some(100.0) },
+        Constraint::Number {
+            min: 0.0,
+            max: 16000.0,
+            step: Some(100.0),
+        },
     );
     assert_eq!(encode_write(&d, &json!(0)).unwrap(), 0);
     assert_eq!(encode_write(&d, &json!(16000)).unwrap(), 16000);
@@ -144,7 +164,11 @@ fn number_rejects_non_representable_values() {
         Encoding::U16,
         0.1,
         0.0,
-        Constraint::Number { min: 0.0, max: 100.0, step: None },
+        Constraint::Number {
+            min: 0.0,
+            max: 100.0,
+            step: None,
+        },
     );
     assert_eq!(encode_write(&d, &json!(55.5)).unwrap(), 555);
     assert!(matches!(
@@ -161,7 +185,11 @@ fn offset_scale_roundtrip_mirrors_decode_anchor() {
         Encoding::U16,
         0.1,
         1000.0,
-        Constraint::Number { min: 0.0, max: 100.0, step: None },
+        Constraint::Number {
+            min: 0.0,
+            max: 100.0,
+            step: None,
+        },
     );
     let raw = encode_write(&d, &json!(16.5)).unwrap();
     assert_eq!(raw, 1165);
@@ -178,7 +206,11 @@ fn s16_negatives_encode_twos_complement() {
         Encoding::S16,
         1.0,
         0.0,
-        Constraint::Number { min: -500.0, max: 500.0, step: None },
+        Constraint::Number {
+            min: -500.0,
+            max: 500.0,
+            step: None,
+        },
     );
     assert_eq!(encode_write(&d, &json!(-300)).unwrap(), 65236); // 0xFEA4
     assert_eq!(encode_write(&d, &json!(300)).unwrap(), 300);
@@ -188,7 +220,11 @@ fn s16_negatives_encode_twos_complement() {
         Encoding::S16,
         1.0,
         0.0,
-        Constraint::Number { min: 0.0, max: 60000.0, step: None },
+        Constraint::Number {
+            min: 0.0,
+            max: 60000.0,
+            step: None,
+        },
     );
     assert!(matches!(
         encode_write(&wide, &json!(40000)),
@@ -203,7 +239,11 @@ fn non_writable_and_multiword_rejected() {
         Encoding::U16,
         1.0,
         0.0,
-        Constraint::Number { min: 0.0, max: 100.0, step: None },
+        Constraint::Number {
+            min: 0.0,
+            max: 100.0,
+            step: None,
+        },
     );
     d.writable = false;
     assert!(matches!(
@@ -213,10 +253,16 @@ fn non_writable_and_multiword_rejected() {
 
     let u32d = def(
         "dbl",
-        Encoding::U32 { base_word: solar_controller::map::BaseWord::Low },
+        Encoding::U32 {
+            base_word: solar_controller::map::BaseWord::Low,
+        },
         1.0,
         0.0,
-        Constraint::Number { min: 0.0, max: 100.0, step: None },
+        Constraint::Number {
+            min: 0.0,
+            max: 100.0,
+            step: None,
+        },
     );
     assert!(matches!(
         encode_write(&u32d, &json!(5)),
@@ -231,11 +277,15 @@ fn real_map_numbers_and_options_roundtrip() {
         match &c.constraint {
             Constraint::Number { min, max, .. } => {
                 for v in [*min, *max] {
-                    let raw = encode_write(c, &json!(v))
-                        .unwrap_or_else(|e| panic!("{}: {e}", c.name));
+                    let raw =
+                        encode_write(c, &json!(v)).unwrap_or_else(|e| panic!("{}: {e}", c.name));
                     match decode_field(&Field::from(c), &[raw]).unwrap() {
                         solar_controller::decode::Value::Number(back) => {
-                            assert!((back - v).abs() < 1e-9, "{}: {v} -> {raw} -> {back}", c.name);
+                            assert!(
+                                (back - v).abs() < 1e-9,
+                                "{}: {v} -> {raw} -> {back}",
+                                c.name
+                            );
                         }
                         other => panic!("{}: decoded to {other:?}", c.name),
                     }

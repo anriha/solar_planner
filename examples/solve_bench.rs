@@ -94,7 +94,8 @@ fn problem(slots: usize, action_step_kw: f64, energy_step_kwh: f64, soc: f64) ->
                     hours: Hours::new(0.25),
                 },
                 price_sell: CzkPerKwh::new(spot - 0.3),
-                price_buy: CzkPerKwh::new(spot + 2.515 + 0.3),
+                // Net spot × 21 % VAT, then the ceník's VAT-inclusive charges.
+                price_buy: CzkPerKwh::new(spot * 1.21 + 2.515 + 0.3),
                 pv_kw: DcKw::new(slot_pv(i)),
                 load_kw: AcKw::new(0.09),
             }
@@ -133,13 +134,21 @@ fn main() {
 
     println!(
         "{:>7} {:>7} {:>6} {:>7} {:>6} {:>10} {:>10} {:>10} {:>9} {:>6}",
-        "slots", "e_step", "levels", "a_step", "actions", "min_ms", "median_ms", "mean_ms",
-        "plan_czk", "traded"
+        "slots",
+        "e_step",
+        "levels",
+        "a_step",
+        "actions",
+        "min_ms",
+        "median_ms",
+        "mean_ms",
+        "plan_czk",
+        "traded"
     );
 
     for slots in [96usize, 140] {
         for (energy_step, action_step) in [
-            (0.32, 1.2),  // live today
+            (0.32, 1.2), // live today
             (0.32, 0.6),
             (0.32, 0.4),
             (0.32, 0.3),

@@ -8,7 +8,10 @@ use solar_controller::{
     telemetry::PlanningSignals,
 };
 
-fn synthetic_image(map: &solar_controller::map::RegisterMap, spans: &[ReadSpan]) -> BTreeMap<u16, u16> {
+fn synthetic_image(
+    map: &solar_controller::map::RegisterMap,
+    spans: &[ReadSpan],
+) -> BTreeMap<u16, u16> {
     // Zeros everywhere, except option sensors get their first enum value —
     // raw 0 is not a valid option index for run_state et al.
     let mut image = BTreeMap::new();
@@ -19,7 +22,10 @@ fn synthetic_image(map: &solar_controller::map::RegisterMap, spans: &[ReadSpan])
     }
     for sensor in &map.sensors {
         if let Some(opts) = &sensor.options {
-            image.insert(sensor.address, opts.first().expect("non-empty options").value);
+            image.insert(
+                sensor.address,
+                opts.first().expect("non-empty options").value,
+            );
         }
     }
     // Select controls likewise need a valid option index (raw 0 may not be one).
@@ -34,10 +40,7 @@ fn synthetic_image(map: &solar_controller::map::RegisterMap, spans: &[ReadSpan])
     image
 }
 
-fn synthetic_reads(
-    spans: &[ReadSpan],
-    image: &BTreeMap<u16, u16>,
-) -> Vec<(ReadSpan, Vec<u16>)> {
+fn synthetic_reads(spans: &[ReadSpan], image: &BTreeMap<u16, u16>) -> Vec<(ReadSpan, Vec<u16>)> {
     spans
         .iter()
         .map(|s| (*s, (s.start..s.start + s.len).map(|a| image[&a]).collect()))
@@ -49,15 +52,27 @@ fn decodes_every_sensor_from_a_synthetic_image() {
     let map = load_from_str(EMBEDDED_MAP).unwrap();
     let spans = plan_spans(&map, MERGE_GAP);
 
-    let snap = decode_all(&map, &synthetic_reads(&spans, &synthetic_image(&map, &spans))).unwrap();
+    let snap = decode_all(
+        &map,
+        &synthetic_reads(&spans, &synthetic_image(&map, &spans)),
+    )
+    .unwrap();
 
     assert!(snap.link_ok);
     assert_eq!(snap.values.len(), map.sensors.len() + map.controls.len());
     for sensor in &map.sensors {
-        assert!(snap.values.contains_key(&sensor.name), "missing {}", sensor.name);
+        assert!(
+            snap.values.contains_key(&sensor.name),
+            "missing {}",
+            sensor.name
+        );
     }
     for control in &map.controls {
-        assert!(snap.values.contains_key(&control.name), "missing {}", control.name);
+        assert!(
+            snap.values.contains_key(&control.name),
+            "missing {}",
+            control.name
+        );
     }
     // u32 base-low over zero words assembles to 0, scale applies
     assert_eq!(snap.values["rated_power"], Value::Number(0.0));
@@ -73,7 +88,10 @@ fn fails_loudly_when_a_span_is_missing() {
 
     let err = decode_all(&map, &reads).unwrap_err().to_string();
     assert!(err.contains("not covered"), "unexpected error: {err}");
-    assert!(err.contains("serial_number"), "error should name the sensor: {err}");
+    assert!(
+        err.contains("serial_number"),
+        "error should name the sensor: {err}"
+    );
 }
 
 /// The planner's view of the snapshot is a rename detector: if `battery_soc` or
@@ -83,7 +101,11 @@ fn planning_signals_extract_from_the_real_map() {
     let map = load_from_str(EMBEDDED_MAP).unwrap();
     let spans = plan_spans(&map, MERGE_GAP);
 
-    let snap = decode_all(&map, &synthetic_reads(&spans, &synthetic_image(&map, &spans))).unwrap();
+    let snap = decode_all(
+        &map,
+        &synthetic_reads(&spans, &synthetic_image(&map, &spans)),
+    )
+    .unwrap();
     let signals = PlanningSignals::extract(&snap).expect("both planner signals decode");
 
     assert_eq!(signals.battery_soc, 0.0);

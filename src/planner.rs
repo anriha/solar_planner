@@ -70,16 +70,18 @@ pub struct Slot {
     pub mtu: Mtu,
     /// Net price received per kWh exported (spot − sell fee).
     pub price_sell: CzkPerKwh,
-    /// Price paid per kWh imported: the spot price plus the configured distribution and
-    /// seller charges (all in CZK/kWh, VAT included). Set by `horizon::assemble`, never a
-    /// constant — the plant is on spot pricing both ways since 2026-11-06.
+    /// Price paid per kWh imported: the spot price times VAT, plus the configured
+    /// distribution and seller charges (all in CZK/kWh; the charges are VAT-inclusive and
+    /// only the spot is quoted net). Set by `horizon::assemble`, never a constant — the
+    /// plant is on spot pricing both ways since 2026-11-06.
     pub price_buy: CzkPerKwh,
     /// Forecast PV production on the DC side during this MTU — array output, before any
     /// conversion. Every AC-side quantity is produced through a [`Params`] path curve.
     pub pv_kw: DcKw,
-    /// The plant's own AC consumption during this MTU — the inverter plus the Pi, ~0.09 kW
-    /// and effectively constant. **Not the house**: it sits behind its own meter, so its
-    /// consumption never enters the transition; it enters only through the sharing revenue.
+    /// The plant's own AC consumption during this MTU — the inverter standby (107 W at the
+    /// ČEZ meter) plus the ~10 W Pi, **0.117 kW** and effectively constant. **Not the
+    /// house**: it sits behind its own meter, so its consumption never enters the
+    /// transition; it enters only through the sharing revenue.
     pub load_kw: AcKw,
 }
 
@@ -108,6 +110,30 @@ pub enum Action {
     /// Import `kw` of AC into the plant on top of whatever PV produces; it charges the
     /// pack once PV has covered the site load.
     Import { kw: AcKw },
+}
+
+impl Action {
+    /// The same decision as the wire tag: `idle` | `export` | `import`.
+    ///
+    /// Every surface that shows a decision (the plan projection, the Prometheus exposition)
+    /// needs this string, and each one had its own `match` until 2026-11-09.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Action::Idle => "idle",
+            Action::Export { .. } => "export",
+            Action::Import { .. } => "import",
+        }
+    }
+
+    /// The grid-facing power, **signed the way the meter and the plan read it**: positive
+    /// exports, negative imports. The single flip point for every consumer.
+    pub fn signed_kw(&self) -> f64 {
+        match self {
+            Action::Idle => 0.0,
+            Action::Export { kw } => kw.get(),
+            Action::Import { kw } => -kw.get(),
+        }
+    }
 }
 
 // Settled 2026-11-05, superseding the knot-union rule of 2026-11-04: the ladder is the
@@ -357,12 +383,17 @@ impl<I: Quantity, O: Quantity> EfficiencyCurve<I, O> {
 /// rating, efficiency knots) and `Directives` (policy: SOC bounds, efficiency
 /// measurements). Prices are **not** here — they arrive per MTU in [`Slot`].
 ///
-/// The efficiency model is the **four measured paths and nothing else** (wiki
-/// `entities/deye-inverter-energy-model.md`): PV→pack, PV→grid, pack→grid, grid→pack.
-/// Each is a power-dependent curve with its own measured values. There is no global
-/// round-trip factor and no fifth stage — the daily 0.918–0.932 terminal ratio is what
-/// these paths multiply out to over a cycle, used as a consistency check on the curve
-/// values rather than as a number in the model.
+/// The efficiency model is the **four measured paths and nothing else**: PV→pack,
+/// PV→grid, pack→grid, grid→pack. Each is a power-dependent curve with its own measured
+/// values. The pack's own loss (voltage + coulombic, ~91 % round trip) is **folded into**
+/// the three paths that charge or discharge it, because `E` is SOC × capacity — cell
+/// energy — and there is no battery stage of its own. Nothing here includes the inverter
+/// standby: that is [`Slot::load_kw`], charged separately at 0.117 kW.
+///
+/// The terminal-to-terminal ratio in the Deye's daily counters (`battery_discharge_today /
+/// battery_charge_today`, 0.918–0.932) is the **pack alone** and is not a consistency check
+/// on these curves — 2026-11-09 correction; multiplying the two inverter legs happened to
+/// land near it, which is why the earlier note claimed a match.
 #[derive(Debug, Clone)]
 pub struct Params {
     /// Nominal pack energy (boot config; reg 102 = 628 Ah at ~51.2 V ≈ 32 kWh).
@@ -384,18 +415,17 @@ pub struct Params {
     /// voltage — below the pack's 10.24 kW, so a purchase is capped here unless PV is
     /// already charging. The actuator clamps its current register to the same number.
     pub grid_charge_max_kw: DcKw,
-    /// PV DC → pack terminals, by power. Measured 94.7 % at 5–9 kW, 94.3 % at 3–5,
-    /// 92.8 % at 1.5–3, **87.0 % below 1.5** — the low-power collapse is why the knots
-    /// matter.
+    /// PV DC → pack energy, by power, with the pack's own round trip folded in. Measured
+    /// 92.7 % at 0.94 kW down to 88.8 % at 10.1 — the loss grows with charging current.
     pub pv_to_battery: EfficiencyCurve<DcKw, DcKw>,
-    /// PV DC → AC bus, by power; serves the site load and the export alike. Measured
-    /// 96–98 % — nameplate 97.6 max / 97.0 Euro.
+    /// PV DC → AC at the meter, by power; serves the site load and the export alike.
+    /// Measured 97.5–98.3 % above 4 kW; there is no trustworthy point below that.
     pub pv_to_grid: EfficiencyCurve<DcKw, AcKw>,
-    /// Pack terminals → AC bus, by power; serves the site load and the export alike.
-    /// Measured 96.9 % at 6–11 kW, 96.0 % at 3–6, 93.9 % below 3.
+    /// Pack energy → AC at the meter, by power, with the discharge leg folded in.
+    /// Measured 95.9 % at 4.84 kW down to 92.8 % at 9.55.
     pub battery_to_grid: EfficiencyCurve<DcKw, AcKw>,
-    /// Grid → pack terminals, by power — the AC charger leg. **Unmeasured**; the 95 %
-    /// figure is the working assumption and should be replaced when measured.
+    /// Grid AC → pack energy, by power — the AC charger leg with the charge leg folded
+    /// in. Measured 92.8 % at 2.17 kW AC in, 89.0 % at 8.32; nothing between.
     pub grid_to_battery: EfficiencyCurve<AcKw, DcKw>,
     /// Hard lower SOC bound, `0.0..=1.0`.
     pub soc_floor: f64,
@@ -470,10 +500,9 @@ impl Reason {
                 price_sell,
                 marginal,
             } => format!("sell {:.2} > stored {:.2} CZK/kWh", price_sell, marginal),
-            Reason::PvCannotBeStored {
-                pv_kw,
-                headroom_kw,
-            } => format!("PV {:.1} kW, headroom {:.1} kW", pv_kw, headroom_kw),
+            Reason::PvCannotBeStored { pv_kw, headroom_kw } => {
+                format!("PV {:.1} kW, headroom {:.1} kW", pv_kw, headroom_kw)
+            }
             Reason::BuyBelowFutureValue {
                 price_buy,
                 marginal,
@@ -497,8 +526,8 @@ pub struct PlanStep {
     /// Net price received per kWh exported this MTU (spot − sell fee). Carried so a plan
     /// frame can be charted without joining it against a second copy of the horizon.
     pub price_sell: CzkPerKwh,
-    /// Price paid per kWh imported this MTU (spot + distribution + seller charges, VAT
-    /// included) — the same number [`Slot::price_buy`] gave the DP.
+    /// Price paid per kWh imported this MTU (spot × VAT + distribution + seller charges; the
+    /// charges are VAT-inclusive) — the same number [`Slot::price_buy`] gave the DP.
     pub price_buy: CzkPerKwh,
     /// Forecast PV on the DC side during this MTU, before any conversion curve.
     pub pv_kw: DcKw,
@@ -606,9 +635,12 @@ fn value_at(row: &[Czk], levels: &[DcKwh], energy_kwh: DcKwh) -> Czk {
 /// A stored DC kWh reaches the meter only through `battery_to_grid`, so the salvage price
 /// is applied to AC energy, not to DC energy. The curve is a function of power, not of
 /// energy: the tail is valued at the pack's rated discharge rate
-/// (`battery_discharge_max_kw`), the best measured efficiency on that path, which errors
-/// toward holding rather than dumping. A lowered discharge limit moves the reference point
-/// with it, so the valuation never assumes a flow the pack will not deliver.
+/// (`battery_discharge_max_kw`). On the measured curve the efficiency **falls** with power,
+/// so this is now the worst point and the valuation errs toward selling rather than
+/// holding — the opposite of the note it carried while the curve rose. A lowered discharge
+/// limit moves the reference point with it, so the valuation never assumes a flow the pack
+/// will not deliver. (2026-11-09 review, open choice: a typical selling power may be the
+/// better reference.)
 fn salvage_energy(level: DcKwh, params: &Params) -> AcKwh {
     AcKwh::new(level.get() * params.battery_to_grid.at(params.battery_discharge_max_kw))
 }
@@ -726,7 +758,10 @@ pub fn build_value_table(problem: &Problem) -> Result<ValueTable, PlanError> {
     // of the policy band. The extra levels are not a policy change: charging above the
     // ceiling is still bounded by `headroom`, and the floor still forbids exporting below
     // itself.
-    let measured = problem.initial_energy_kwh.max(DcKwh::ZERO).min(params.capacity_kwh);
+    let measured = problem
+        .initial_energy_kwh
+        .max(DcKwh::ZERO)
+        .min(params.capacity_kwh);
     while levels[0] > measured {
         levels.insert(0, levels[0] - step);
     }
@@ -781,11 +816,7 @@ pub fn build_value_table(problem: &Problem) -> Result<ValueTable, PlanError> {
         rows[index] = row;
     }
 
-    Ok(ValueTable {
-        levels,
-        rows,
-        step,
-    })
+    Ok(ValueTable { levels, rows, step })
 }
 
 /// The part of MTU `index` that is still ahead of `problem.now`. Only the first MTU can be
@@ -1012,7 +1043,7 @@ pub struct Flow {
 ///    with whatever room the PV charge left; the charger's own 185 A limit
 ///    ([`Params::grid_charge_max_kw`]) applies. Only the part that lands in the pack is
 ///    billed, so a full pack costs nothing to have "offered" a charge it refused.
-/// 5. The plant's own ~0.09 kW standby is already inside [`Slot::load_kw`]; there is no
+/// 5. The plant's own ~0.117 kW standby is already inside [`Slot::load_kw`]; there is no
 ///    separate idle term.
 ///
 /// The result is **not clamped** — `solve` clamps to the energy grid. It reports the
@@ -1279,7 +1310,10 @@ mod tests {
             full.steps[0].ac_kwh
         );
         assert!(
-            (half.expected_net_czk.get() - (full.expected_net_czk.get() - full.steps[0].net_czk.get() / 2.0)).abs() < 1e-6,
+            (half.expected_net_czk.get()
+                - (full.expected_net_czk.get() - full.steps[0].net_czk.get() / 2.0))
+                .abs()
+                < 1e-6,
             "the first MTU's revenue must be scaled too: {} vs {}",
             half.expected_net_czk,
             full.expected_net_czk
@@ -1296,8 +1330,8 @@ mod tests {
         };
         // One MTU: with two, buying at 5 to sell at 20 below the floor is a valid trade and
         // the plan legitimately imports first. The point here is only the starting energy.
-        let below = solve(&problem(hourly(&[20.0], 0.0, 0.0), 0.15, cheap))
-            .expect("below the floor");
+        let below =
+            solve(&problem(hourly(&[20.0], 0.0, 0.0), 0.15, cheap)).expect("below the floor");
         assert!(
             !below
                 .steps
@@ -1307,7 +1341,10 @@ mod tests {
             below.steps
         );
         assert!(
-            (below.steps[0].energy_after_kwh - DcKwh::new(4.8)).abs().get() < 1e-9,
+            (below.steps[0].energy_after_kwh - DcKwh::new(4.8))
+                .abs()
+                .get()
+                < 1e-9,
             "the plan did not start from the measured 4.8 kWh: {}",
             below.steps[0].energy_after_kwh
         );
@@ -1398,9 +1435,7 @@ mod tests {
         let params = params();
         // Fixture sanity only — the two ratings live in different domains, which is why
         // this compares raw numbers instead of the newtypes.
-        assert!(
-            params.battery_discharge_max_kw.get() < params.max_power_kw.get()
-        );
+        assert!(params.battery_discharge_max_kw.get() < params.max_power_kw.get());
         let slots = hourly(&[20.0], 0.0, 0.0);
         let slot = &slots[0];
 

@@ -85,7 +85,10 @@ async fn a_cycle_publishes_a_plan_through_the_state_actor() {
     );
 
     // The bridge's last poll, as the planner reads it.
-    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+    let _ = state
+        .tell(Update::Good(snapshot_with_soc(60.0)))
+        .send()
+        .await;
 
     let horizon = HorizonActor::new(
         FakePrices(window(8, 300.0)),
@@ -94,7 +97,10 @@ async fn a_cycle_publishes_a_plan_through_the_state_actor() {
     );
     let mut planner = PlannerActor::new(horizon, state.clone(), directives, None);
 
-    let plan = planner.cycle(T0).await.expect("a cycle with feeds and a reading");
+    let plan = planner
+        .cycle(T0)
+        .await
+        .expect("a cycle with feeds and a reading");
 
     assert_eq!(plan.steps.len(), 8, "one step per published MTU");
     assert_eq!(plan.steps[0].mtu.start, T0);
@@ -115,7 +121,10 @@ async fn the_default_deploy_plans_while_the_actuator_is_off() {
     let directives = DirectivesActor::spawn(
         DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
     );
-    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+    let _ = state
+        .tell(Update::Good(snapshot_with_soc(60.0)))
+        .send()
+        .await;
 
     let horizon = HorizonActor::new(
         FakePrices(window(4, 300.0)),
@@ -134,7 +143,10 @@ async fn the_default_deploy_plans_while_the_actuator_is_off() {
     assert_eq!(plan.steps.len(), 4);
 
     let payload = state.ask(GetState).await.expect("state actor alive");
-    assert!(payload.plan.is_some(), "the report-only deploy still reports");
+    assert!(
+        payload.plan.is_some(),
+        "the report-only deploy still reports"
+    );
 }
 
 #[tokio::test]
@@ -144,7 +156,10 @@ async fn a_disarmed_planner_withdraws_its_plan() {
     let directives = DirectivesActor::spawn(
         DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
     );
-    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+    let _ = state
+        .tell(Update::Good(snapshot_with_soc(60.0)))
+        .send()
+        .await;
 
     let horizon = HorizonActor::new(
         FakePrices(window(4, 300.0)),
@@ -182,7 +197,10 @@ async fn a_disabled_planner_withdraws_its_plan() {
     let directives = DirectivesActor::spawn(
         DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
     );
-    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+    let _ = state
+        .tell(Update::Good(snapshot_with_soc(60.0)))
+        .send()
+        .await;
 
     let horizon = HorizonActor::new(
         FakePrices(window(4, 300.0)),
@@ -202,10 +220,16 @@ async fn a_disabled_planner_withdraws_its_plan() {
         .expect("directives actor alive");
 
     let error = planner.cycle(T0 + 900).await.expect_err("disabled");
-    assert!(matches!(error, solar_controller::planner::actor::PlannerError::Disabled));
+    assert!(matches!(
+        error,
+        solar_controller::planner::actor::PlannerError::Disabled
+    ));
 
     let payload = state.ask(GetState).await.expect("state actor alive");
-    assert!(payload.plan.is_none(), "a disabled planner leaves no plan behind");
+    assert!(
+        payload.plan.is_none(),
+        "a disabled planner leaves no plan behind"
+    );
 }
 
 #[tokio::test]
@@ -220,7 +244,10 @@ async fn a_forecast_past_the_published_prices_still_produces_a_plan() {
     let directives = DirectivesActor::spawn(
         DirectivesActor::new(dir.path().join("directives.json"), state.clone()).unwrap(),
     );
-    let _ = state.tell(Update::Good(snapshot_with_soc(60.0))).send().await;
+    let _ = state
+        .tell(Update::Good(snapshot_with_soc(60.0)))
+        .send()
+        .await;
 
     // Today's prices only, and a forecast that reaches all the way to tomorrow evening.
     let mut forecast = Vec::new();
@@ -250,9 +277,16 @@ async fn a_forecast_past_the_published_prices_still_produces_a_plan() {
     );
     let mut planner = PlannerActor::new(horizon, state.clone(), directives, None);
 
-    let plan = planner.cycle(T0).await.expect("the unpriced tail is not fatal");
+    let plan = planner
+        .cycle(T0)
+        .await
+        .expect("the unpriced tail is not fatal");
 
-    assert_eq!(plan.steps.len(), 8, "the horizon stops at the last published price");
+    assert_eq!(
+        plan.steps.len(),
+        8,
+        "the horizon stops at the last published price"
+    );
     assert_eq!(
         plan.horizon_end,
         T0 + 8 * 900,
@@ -274,8 +308,8 @@ fn device_params_carry_the_directives_curves() {
         .apply("pv_to_battery_p1_pct", serde_json::json!(60.0))
         .unwrap();
     let params = device_params(&directives, bootstrap_terminal());
-    assert!((params.pv_to_battery.at(DcKw::new(0.5)) - 0.60).abs() < 1e-12);
-    assert!((params.pv_to_battery.at(DcKw::new(6.0)) - 0.943).abs() < 1e-12);
+    assert!((params.pv_to_battery.at(DcKw::new(0.94)) - 0.60).abs() < 1e-12);
+    assert!((params.pv_to_battery.at(DcKw::new(6.55)) - 0.907).abs() < 1e-12);
 }
 
 /// The battery rate knobs are policy, not device facts: a value edited from HA must reach

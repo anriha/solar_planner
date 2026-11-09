@@ -50,26 +50,11 @@ pub enum ServerMsg {
     /// The plan, pushed when the planner publishes one and re-sent to a subscriber that
     /// catches up after lagging. `None` withdraws it (planner off, or no horizon yet).
     ///
-    /// The browser never reads this frame — it is told [`ServerMsg::PlanChanged`] and
-    /// re-requests a [`ServerMsg::View`] (board-zpe).
-    Plan { plan: Option<Plan> },
-    /// The plan changed — an invitation to re-request a view, not a second copy of the plan.
-    ///
-    /// Sent only to connections that have asked for a view at least once. It deliberately
-    /// carries no payload: the client re-requests `get_view` with **its own** window, so a
-    /// viewer showing a week is never overwritten by a horizon-shaped frame. Until
-    /// 2026-11-09 this frame *was* the view, projected once with the default window and
-    /// cloned to every watcher, which silently reset a wider chart on every replan.
-    PlanChanged {
-        /// `computed_at` of the new plan; `null` when the plan was withdrawn, so a viewer
-        /// can tell "clear the chart" from "re-draw the same plan".
-        computed_at: Option<i64>,
-    },
-    /// The browser's flat projection of the plan (see [`crate::view::View`]). Always the
-    /// reply to a [`ClientMsg::GetView`], so `id` is the request that asked for it.
-    View {
-        id: String,
-        view: crate::view::View,
+    /// This is the *machine* copy of the horizon (Home Assistant reads it). Anything that
+    /// wants the flat projection for a chart asks `/plan.json` instead: a pushed payload
+    /// would have to pick a window for every reader at once.
+    Plan {
+        plan: Option<Plan>,
     },
     CmdAck {
         id: String,
@@ -130,28 +115,6 @@ pub enum ClientMsg {
         id: String,
         name: String,
         value: serde_json::Value,
-    },
-    /// Ask for the browser's flat plan projection (board-zpe).
-    ///
-    ///   client->server {"type":"get_view","id":"v1","from":1793746800,"to":1793833200}
-    ///   server->client {"type":"view","id":"v1","view":{...}}
-    ///
-    /// `from`/`to` are unix seconds and optional: omitted, both default to the plan's own
-    /// horizon. The window is clamped to [`crate::view::MAX_WINDOW_SECS`] — 60 days — and the
-    /// reply echoes the window actually served. Answering also subscribes the connection to
-    /// [`ServerMsg::PlanChanged`] notices, so the window it asked for is the window it keeps
-    /// getting; a client that never asks (Home Assistant) never receives them.
-    GetView {
-        id: String,
-        #[serde(default)]
-        from: Option<i64>,
-        #[serde(default)]
-        to: Option<i64>,
-        /// How far back from `now` to start when `from` is absent: `604800` is "the last
-        /// week, plus whatever horizon the plan has". The bridge's clock decides, so a
-        /// browser whose clock disagrees cannot place the window wrong.
-        #[serde(default)]
-        history: Option<i64>,
     },
     Ping,
 }

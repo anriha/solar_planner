@@ -13,10 +13,10 @@
 //!   the four measured efficiency curves — they are measurements of this plant, retunable
 //!   from HA one point at a time.
 
+use kameo::Actor;
 use kameo::actor::ActorRef;
 use kameo::message::Message;
 use kameo::prelude::Context;
-use kameo::Actor;
 use thiserror::Error;
 
 use crate::bus::{BusActor, WriteRegister};
@@ -37,8 +37,10 @@ use crate::units::{AcKw, CzkPerKwh, DcKw, DcKwh, Quantity};
 /// The pack's two rates are **policy** now (`Directives::battery_discharge_kw` /
 /// `battery_charge_kw`), not constants; this charger ceiling is still hardware.
 const GRID_CHARGE_MAX_KW: f64 = 9.472;
-/// The plant's own AC draw: inverter standby plus the Pi.
-const PLANT_LOAD_KW: f64 = 0.09;
+/// The plant's own AC draw: inverter standby (86.8 W inverter-metered, 107.4 W at the ČEZ
+/// meter once the +20.7 W meter offset is applied) plus the ~10 W Pi on the load port.
+/// The efficiency curves are standby-free, so this is the only place the standby is charged.
+const PLANT_LOAD_KW: f64 = 0.117;
 /// Bootstrap terminal value, used until the price cache has produced a measured one.
 const TERMINAL_CZK_PER_KWH: f64 = BOOTSTRAP_TERMINAL_CZK_PER_KWH;
 
@@ -126,11 +128,13 @@ pub fn actuator_params(directives: &Directives) -> ActuatorParams {
 }
 
 /// The horizon's slice of policy: what selling nets, what buying costs, what the plant
-/// draws on its own. The buy side is spot + the two charges (2026-11-06); there is no flat
-/// tariff any more, so nothing here may collapse back into a single price.
+/// draws on its own. The buy side is `spot × (1 + VAT) + the two charges` — only the
+/// commodity is quoted net, the charges are the ceník's final numbers (2026-11-10) — so
+/// nothing here may collapse back into a single price.
 pub fn horizon_params(directives: &Directives) -> HorizonParams {
     HorizonParams {
         sell_fee: CzkPerKwh::new(directives.sell_fee_czk.get()),
+        buy_vat_pct: directives.buy_vat_pct.get(),
         buy_distribution: CzkPerKwh::new(directives.buy_distribution_czk.get()),
         buy_seller_fee: CzkPerKwh::new(directives.buy_seller_fee_czk.get()),
         load_kw: AcKw::new(PLANT_LOAD_KW),
@@ -226,7 +230,13 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
             if skip.is_some() && skip == actuator::slot_of(&name) {
                 continue;
             }
-            if let Err(error) = bus.ask(WriteRegister { name: name.clone(), value }).await {
+            if let Err(error) = bus
+                .ask(WriteRegister {
+                    name: name.clone(),
+                    value,
+                })
+                .await
+            {
                 if actuator::is_slot_time(&name) {
                     eprintln!(
                         "[planner] write {name} refused ({error}); leaving that slot as it was"
@@ -318,7 +328,11 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
             .ask(GetCurrent)
             .await
             .map_err(|_| PlannerError::Directives)?;
-        let payload = self.state.ask(GetState).await.map_err(|_| PlannerError::State)?;
+        let payload = self
+            .state
+            .ask(GetState)
+            .await
+            .map_err(|_| PlannerError::State)?;
 
         if !directives.planner_enabled {
             // Withdraw the plan rather than leaving a stale one on screen. "Planner off" is
@@ -378,16 +392,18 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         let plan = solve(&problem)?;
 
         // Publish first: the plan is useful to look at even if a write is refused.
-        let _ = self.state.tell(Update::Plan(Some(plan.clone()))).send().await;
+        let _ = self
+            .state
+            .tell(Update::Plan(Some(plan.clone())))
+            .send()
+            .await;
 
         // Two independent stops, both fail closed: the directive is off (the deploy
         // default), or the last poll did not land — a write shaped by a stale SOC and
         // compared against a stale register image is worse than no write. Switching the
         // actuator off is an instruction to stop, so it disarms on the transition.
         if writes_allowed(&directives, payload.link_ok) {
-            self.armed = self
-                .apply(&plan, &payload.values, &directives, now)
-                .await;
+            self.armed = self.apply(&plan, &payload.values, &directives, now).await;
         } else {
             if self.armed && payload.link_ok {
                 self.disarm(&payload.values).await;
@@ -406,11 +422,7 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
 impl<P: PriceSource, F: PvSource> Message<Tick> for PlannerActor<P, F> {
     type Reply = ();
 
-    async fn handle(
-        &mut self,
-        _msg: Tick,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, _msg: Tick, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         let now = crate::telemetry::unix_now() as i64;
         match self.cycle(now).await {
             Ok(plan) => eprintln!(
@@ -454,14 +466,20 @@ mod tests {
     #[test]
     fn a_write_needs_both_the_switch_and_a_live_link() {
         let mut directives = Directives::default();
-        assert!(!directives.actuator_enabled, "a fresh deploy must not write");
+        assert!(
+            !directives.actuator_enabled,
+            "a fresh deploy must not write"
+        );
         assert!(
             !writes_allowed(&directives, true),
             "the default deploy plans and reports only"
         );
 
         directives.actuator_enabled = true;
-        assert!(writes_allowed(&directives, true), "switched on with a live link");
+        assert!(
+            writes_allowed(&directives, true),
+            "switched on with a live link"
+        );
         assert!(
             !writes_allowed(&directives, false),
             "a dead link never writes, even with the switch on"

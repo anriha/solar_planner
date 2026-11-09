@@ -91,8 +91,9 @@ fn str_without_words_is_rejected() {
 
 #[test]
 fn str_zero_words_is_rejected() {
-    let err =
-        parse(r#"sensors = [ { name = "x", address = 1, encoding = { type = "str", words = 0 } } ]"#);
+    let err = parse(
+        r#"sensors = [ { name = "x", address = 1, encoding = { type = "str", words = 0 } } ]"#,
+    );
     assert!(err.is_err());
 }
 
@@ -123,7 +124,10 @@ controls = [ { name = "c", address = 146, encoding = { type = "u16" }, writable 
     .expect("bitmask switch should load");
     assert!(matches!(
         &ok.controls[0].constraint,
-        solar_controller::map::Constraint::Switch { bitmask: Some(1), .. }
+        solar_controller::map::Constraint::Switch {
+            bitmask: Some(1),
+            ..
+        }
     ));
     // zero mask, bits outside the mask, and bitmask on non-switch kinds reject
     for bad in [

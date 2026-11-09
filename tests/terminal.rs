@@ -5,8 +5,8 @@
 //! the 7 Prague days ending today, minus the sell fee. The tests below are chosen so that a
 //! mean, an off-by-one window or a missing fee all fail one of them.
 
-use solar_controller::planner::{Mtu, TERMINAL_DAYS, TerminalValue};
 use solar_controller::planner::price::PricePoint;
+use solar_controller::planner::{Mtu, TERMINAL_DAYS, TerminalValue};
 use solar_controller::units::{CzkPerKwh, Hours};
 
 /// 2026-11-04T00:00 Prague (CET, UTC+1) — no DST change inside the test window.
@@ -29,12 +29,17 @@ fn point(start: i64, czk_per_kwh: f64) -> PricePoint {
 /// One day's worth of prices: a quiet morning and a maximum exactly at noon.
 fn day(offset: i64, max_czk: f64) -> Vec<PricePoint> {
     let start = TODAY + offset * DAY;
-    vec![point(start, max_czk / 2.0), point(start + 12 * 3600, max_czk)]
+    vec![
+        point(start, max_czk / 2.0),
+        point(start + 12 * 3600, max_czk),
+    ]
 }
 
 fn median_of(maxima: &[f64]) -> f64 {
     let mut points = Vec::new();
-    let offsets: Vec<i64> = (0..maxima.len() as i64).map(|i| i - (maxima.len() as i64 - 1)).collect();
+    let offsets: Vec<i64> = (0..maxima.len() as i64)
+        .map(|i| i - (maxima.len() as i64 - 1))
+        .collect();
     for (offset, max) in offsets.iter().zip(maxima) {
         points.extend(day(*offset, *max));
     }

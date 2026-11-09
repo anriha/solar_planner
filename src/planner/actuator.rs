@@ -184,34 +184,29 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
         blocks.push(Block { start, ..last });
     }
 
-    let (
-        max_sell_w,
-        charge_current_a,
-        charge_current_limited,
-        charge_limit_a,
-        charge_requested_kw,
-    ) = match current {
-        Kind::Sell { kw } => ((kw * 1000.0).round() as u16, 0, false, 0, 0.0),
-        Kind::Buy { kw } => {
-            // The plan's AC import as pack amps, at the nominal voltage. Two ceilings bind:
-            // the operator's DC charge rate (`battery_charge_kw`) and reg 128's own 185 A.
-            // The DP already prices against the rate, so this clamp only catches the AC/DC
-            // conversion gap — but without it a 6.1 kW charge rate would still write 126 A.
-            let wanted = (kw * 1000.0) / PACK_VOLTS;
-            let limit = (params.battery_charge_kw * 1000.0 / PACK_VOLTS).min(MAX_CHARGE_A);
-            (
-                0,
-                wanted.min(limit).round() as u16,
-                wanted > limit,
-                limit.round() as u16,
-                kw,
-            )
-        }
-        // A hold exports whatever the pack cannot take, so the export cap is the interface
-        // rating, not zero. Nothing leaves the pack: the slot's own power cap is 0 W, so this
-        // number only lets the PV surplus through.
-        Kind::Hold => (MAX_SELL_W as u16, 0, false, 0, 0.0),
-    };
+    let (max_sell_w, charge_current_a, charge_current_limited, charge_limit_a, charge_requested_kw) =
+        match current {
+            Kind::Sell { kw } => ((kw * 1000.0).round() as u16, 0, false, 0, 0.0),
+            Kind::Buy { kw } => {
+                // The plan's AC import as pack amps, at the nominal voltage. Two ceilings bind:
+                // the operator's DC charge rate (`battery_charge_kw`) and reg 128's own 185 A.
+                // The DP already prices against the rate, so this clamp only catches the AC/DC
+                // conversion gap — but without it a 6.1 kW charge rate would still write 126 A.
+                let wanted = (kw * 1000.0) / PACK_VOLTS;
+                let limit = (params.battery_charge_kw * 1000.0 / PACK_VOLTS).min(MAX_CHARGE_A);
+                (
+                    0,
+                    wanted.min(limit).round() as u16,
+                    wanted > limit,
+                    limit.round() as u16,
+                    kw,
+                )
+            }
+            // A hold exports whatever the pack cannot take, so the export cap is the interface
+            // rating, not zero. Nothing leaves the pack: the slot's own power cap is 0 W, so this
+            // number only lets the PV surplus through.
+            Kind::Hold => (MAX_SELL_W as u16, 0, false, 0, 0.0),
+        };
 
     Desired {
         blocks,
@@ -662,7 +657,10 @@ mod tests {
 
         assert_eq!(desired.blocks.len(), SLOTS);
         assert_eq!(desired.blocks[0].start, "00:00");
-        assert_eq!(desired.blocks[0].soc, 20, "discharge is allowed only to the floor");
+        assert_eq!(
+            desired.blocks[0].soc, 20,
+            "discharge is allowed only to the floor"
+        );
         assert_eq!(desired.blocks[0].power_w, 6000);
         assert!(desired.sell_from_pack, "a sell is the pack's export valve");
         assert!(desired.sell_surplus, "selling needs solar sell on");
@@ -680,7 +678,10 @@ mod tests {
         assert_eq!(desired.blocks[0].power_w, 0, "nothing may leave the pack");
         // A hold must NOT run `selling_first`: there the plant sells the PV and never charges
         // the pack (2026-11-07 — flat 21 % behind a 100 % target, 12 kW to the meter).
-        assert!(!desired.sell_from_pack, "a hold never exports from the pack");
+        assert!(
+            !desired.sell_from_pack,
+            "a hold never exports from the pack"
+        );
         assert!(desired.sell_surplus, "the surplus still leaves");
         assert_eq!(desired.max_sell_w, 12000, "the interface rating, not zero");
     }
@@ -689,7 +690,11 @@ mod tests {
     fn a_buy_block_still_curtails_its_surplus() {
         // A grid-charge block runs in a no-export mode: the DP does not credit the surplus
         // there, and the actuator must not export it either.
-        let desired = desired(&plan(vec![Action::Import { kw: AcKw::new(6.0) }]), T0, &params());
+        let desired = desired(
+            &plan(vec![Action::Import { kw: AcKw::new(6.0) }]),
+            T0,
+            &params(),
+        );
 
         assert!(!desired.sell_from_pack);
         assert!(!desired.sell_surplus);
@@ -739,7 +744,10 @@ mod tests {
             &params(),
         ));
 
-        assert_eq!(targets[0].name, "work_mode", "nothing leaves while slots change");
+        assert_eq!(
+            targets[0].name, "work_mode",
+            "nothing leaves while slots change"
+        );
         assert_eq!(targets[0].expect, Value::Text("zero_export_load".into()));
     }
 
@@ -756,10 +764,17 @@ mod tests {
 
     #[test]
     fn a_buy_block_charges_from_the_grid_within_the_pack_limit() {
-        let desired = desired(&plan(vec![Action::Import { kw: AcKw::new(6.0) }]), T0, &params());
+        let desired = desired(
+            &plan(vec![Action::Import { kw: AcKw::new(6.0) }]),
+            T0,
+            &params(),
+        );
 
         assert_eq!(desired.blocks[0].charge, Charge::Grid);
-        assert_eq!(desired.blocks[0].soc, 80, "charge to the ceiling, no further");
+        assert_eq!(
+            desired.blocks[0].soc, 80,
+            "charge to the ceiling, no further"
+        );
         assert!(desired.grid_charge);
         assert_eq!(desired.charge_current_a, 117, "6 kW at 51.2 V");
         assert!(!desired.charge_current_limited);
@@ -767,11 +782,20 @@ mod tests {
 
     #[test]
     fn an_import_above_the_charger_limit_is_clamped_to_185_a() {
-        let desired = desired(&plan(vec![Action::Import { kw: AcKw::new(12.0) }]), T0, &params());
+        let desired = desired(
+            &plan(vec![Action::Import {
+                kw: AcKw::new(12.0),
+            }]),
+            T0,
+            &params(),
+        );
 
         assert_eq!(desired.charge_current_a, 185);
         assert!(desired.charge_current_limited);
-        assert_eq!(desired.charge_limit_a, 185, "the register's own ceiling binds");
+        assert_eq!(
+            desired.charge_limit_a, 185,
+            "the register's own ceiling binds"
+        );
         assert_eq!(desired.charge_requested_kw, 12.0);
     }
 
@@ -781,7 +805,9 @@ mod tests {
         // when this knob was asked for. The plan's 12 kW import asks for 234 A; the
         // configured rate, not the register's 185 A, must be what binds.
         let desired = desired(
-            &plan(vec![Action::Import { kw: AcKw::new(12.0) }]),
+            &plan(vec![Action::Import {
+                kw: AcKw::new(12.0),
+            }]),
             T0,
             &params_charging_at(6.144),
         );
@@ -795,7 +821,9 @@ mod tests {
     fn a_charge_rate_above_the_registers_ceiling_still_writes_185_a() {
         // The knob may only lower: 10.24 kW is 200 A, but reg 128 stops at 185 A.
         let desired = desired(
-            &plan(vec![Action::Import { kw: AcKw::new(12.0) }]),
+            &plan(vec![Action::Import {
+                kw: AcKw::new(12.0),
+            }]),
             T0,
             &params_charging_at(10.24),
         );
@@ -892,7 +920,10 @@ mod tests {
         assert_eq!(desired.blocks[1].start, "23:45");
         assert_eq!(desired.blocks[2].start, "23:50");
         assert_eq!(desired.blocks[3].start, "23:55");
-        assert_eq!(desired.blocks[5].start, "23:55", "the tail piles up on the grid");
+        assert_eq!(
+            desired.blocks[5].start, "23:55",
+            "the tail piles up on the grid"
+        );
         assert!(
             desired.blocks.iter().all(|block| block.start != "23:59"),
             "an off-grid start leaked out: {:?}",
@@ -932,7 +963,11 @@ mod tests {
 
     #[test]
     fn only_registers_that_disagree_are_written() {
-        let desired = desired(&plan(vec![Action::Export { kw: AcKw::new(6.0) }]), T0, &params());
+        let desired = desired(
+            &plan(vec![Action::Export { kw: AcKw::new(6.0) }]),
+            T0,
+            &params(),
+        );
         let all = targets(&desired);
 
         // Everything already correct except the one register we care about.
@@ -954,7 +989,11 @@ mod tests {
 
     #[test]
     fn a_register_missing_from_the_snapshot_is_an_error_not_a_write() {
-        let desired = desired(&plan(vec![Action::Export { kw: AcKw::new(6.0) }]), T0, &params());
+        let desired = desired(
+            &plan(vec![Action::Export { kw: AcKw::new(6.0) }]),
+            T0,
+            &params(),
+        );
         let observed: BTreeMap<String, Value> = BTreeMap::new();
 
         let error = writes(&desired, &observed).expect_err("a missing register must be loud");
@@ -974,7 +1013,9 @@ mod tests {
         // would be written as a 00:00 slot — before tonight's 23:45 one — and grid charge
         // would be armed for the rest of the day.
         let mut actions = vec![Action::Idle; 5];
-        actions.push(Action::Import { kw: AcKw::new(12.0) });
+        actions.push(Action::Import {
+            kw: AcKw::new(12.0),
+        });
         let desired = desired(&plan_at(start, actions), start + 5 * 60, &params());
 
         assert_eq!(desired.blocks[0].start, "23:45");
@@ -1012,14 +1053,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing"))
         };
 
-        assert_eq!(by_name("work_mode").expect, Value::Text("zero_export_load".into()));
+        assert_eq!(
+            by_name("work_mode").expect,
+            Value::Text("zero_export_load".into())
+        );
         assert_eq!(by_name("max_sell_power").expect, Value::Number(0.0));
         assert_eq!(by_name("solar_sell").expect, Value::Number(0.0));
         assert_eq!(by_name("grid_charge_enable").expect, Value::Number(0.0));
         assert_eq!(by_name("tou_enabled").expect, Value::Number(1.0));
         for n in 1..=SLOTS {
-            assert_eq!(by_name(&format!("tou_soc_{n}")).expect, Value::Number(100.0));
-            assert_eq!(by_name(&format!("tou_power_{n}")).expect, Value::Number(0.0));
+            assert_eq!(
+                by_name(&format!("tou_soc_{n}")).expect,
+                Value::Number(100.0)
+            );
+            assert_eq!(
+                by_name(&format!("tou_power_{n}")).expect,
+                Value::Number(0.0)
+            );
             assert_eq!(
                 by_name(&format!("tou_charge_source_{n}")).expect,
                 Value::Text("off".into())

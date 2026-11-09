@@ -179,41 +179,54 @@ impl PathCurve {
     }
 }
 
-/// PV DC → pack terminals, measured 2026-11-03: 94.7 % at 5–9 kW, 94.3 % at 3–5, 92.8 %
-/// at 1.5–3, **87.0 % below 1.5** — the low-power collapse is why the knots matter.
+/// PV DC → pack energy, measured 2026-10-30..11-08 on the on-grid plant: 92.7 % at
+/// 0.94 kW, 92.9 at 2.33, 92.2 at 3.83, 90.7 at 6.55, 88.8 at 10.1. The pack's own round
+/// trip (~91 %: 94.1 % voltage, 97 % coulombic) is **folded in** — `E` is SOC × capacity,
+/// i.e. cell energy, and the inverter leg alone would overstate this by 5–7 points at
+/// high power. Standby is not in here; it is `PLANT_LOAD_KW`.
 fn default_pv_to_battery() -> PathCurve {
     curve([
-        (0.5, 87.0),
-        (1.5, 87.0),
-        (3.0, 92.8),
-        (6.0, 94.3),
-        (10.0, 94.7),
+        (0.94, 92.7),
+        (2.33, 92.9),
+        (3.83, 92.2),
+        (6.55, 90.7),
+        (10.10, 88.8),
     ])
 }
 
-/// PV DC → AC bus: 97.0 % observed at ~2.1 kW, 97.6 % nameplate maximum. The rising tail
-/// is the datasheet's, not a measurement; below 2 kW the curve clamps at 97.0 %.
+/// PV DC → AC at the ČEZ meter, meter-calibrated (export scale 0.9885, +20.7 W offset):
+/// 98.3 % at 4.18 kW, 97.7 at 6.55, 97.5 at 10.26. Below 4.2 kW there is no trustworthy
+/// point — the meter/inverter export ratio is 1.04 under 3 kW against 0.985–0.99 above, so
+/// one scale does not fit — hence the slots start at 4.18 kW and the curve clamps there.
 fn default_pv_to_grid() -> PathCurve {
-    curve([(2.0, 97.0), (10.0, 97.6), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)])
-}
-
-/// Pack terminals → AC bus, measured: 96.9 % at 6–11 kW, 96.0 % at 3–6, 93.9 % below 3.
-fn default_battery_to_grid() -> PathCurve {
     curve([
-        (0.5, 93.9),
-        (3.0, 93.9),
-        (6.0, 96.0),
-        (10.24, 96.9),
+        (4.18, 98.3),
+        (6.55, 97.7),
+        (10.26, 97.5),
+        (0.0, 0.0),
         (0.0, 0.0),
     ])
 }
 
-/// Grid → pack terminals, the AC charger leg: **unmeasured**, 95 % is the working
-/// assumption, held equal across the range until the leg is observed.
+/// Pack energy → AC at the ČEZ meter, discharge leg folded in: 95.9 % at 4.84 kW, 94.9 at
+/// 6.34, 92.8 at 9.55. Unmeasured below ~4.8 kW; the curve holds 95.9 there.
+fn default_battery_to_grid() -> PathCurve {
+    curve([
+        (4.84, 95.9),
+        (6.34, 94.9),
+        (9.55, 92.8),
+        (0.0, 0.0),
+        (0.0, 0.0),
+    ])
+}
+
+/// Grid AC → pack energy, charge leg folded in: 92.8 % at 2.17 kW AC in, 89.0 at 8.32.
+/// Only those two powers are measured (3.6 h of grid charging in the period); the curve is
+/// clamped outside them.
 fn default_grid_to_battery() -> PathCurve {
     curve([
-        (1.0, 95.0),
-        (9.472, 95.0),
+        (2.17, 92.8),
+        (8.32, 89.0),
         (0.0, 0.0),
         (0.0, 0.0),
         (0.0, 0.0),
@@ -259,9 +272,21 @@ pub struct Directives {
     /// a rate above that never binds on an import.
     #[serde(default = "default_battery_charge_kw")]
     pub battery_charge_kw: f64,
+    /// VAT rate charged on the **spot** component of an imported kWh, percent. OTE quotes
+    /// the day-ahead price net, so the invoice charges `spot × (1 + buy_vat_pct/100)`; the
+    /// two charges below are the ceník's VAT-inclusive figures and are added afterwards
+    /// (2026-11-10). 21 is the Czech standard rate. The sell side has no VAT term: the
+    /// plant's export revenue is not a taxable supply.
+    ///
+    /// `serde(default)` because a `directives.json` written before the field existed must
+    /// still load, and must load at 21 rather than at 0 — a missing tax is the exact bug
+    /// this knob fixes.
+    #[serde(default = "default_buy_vat_pct")]
+    pub buy_vat_pct: Percent,
     /// Distribution and the other regulated per-kWh charges on imported energy, CZK/kWh,
-    /// VAT included. The buy side is `spot + buy_distribution_czk + buy_seller_fee_czk`
-    /// (2026-11-06): the plant is on spot pricing both ways, so no flat tariff exists.
+    /// VAT included. The buy side is `spot × (1 + VAT) + buy_distribution_czk +
+    /// buy_seller_fee_czk` (2026-11-06, extended 2026-11-10): the plant is on spot pricing
+    /// both ways, so no flat tariff exists.
     ///
     /// `serde(default)` because a `directives.json` written before that model lacks the
     /// field — its retired `buy_price_czk` is dropped on load — and must still boot.
@@ -293,7 +318,11 @@ pub struct Directives {
     pub grid_to_battery: PathCurve,
 }
 
-/// The settled per-kWh buy charges, as `serde` defaults for a legacy file.
+/// The settled buy-side tariff, as `serde` defaults for a file written before the fields.
+fn default_buy_vat_pct() -> Percent {
+    Percent::try_from(21.0).expect("static bound")
+}
+
 fn default_buy_distribution() -> Price {
     Price::try_from(2.515).expect("static bound")
 }
@@ -325,6 +354,7 @@ impl Default for Directives {
             max_power_kw: 12.0,
             battery_discharge_kw: default_battery_discharge_kw(),
             battery_charge_kw: default_battery_charge_kw(),
+            buy_vat_pct: default_buy_vat_pct(),
             buy_distribution_czk: default_buy_distribution(),
             buy_seller_fee_czk: default_buy_seller_fee(),
             sell_fee_czk: price(0.5),
@@ -466,9 +496,7 @@ impl Directives {
                 }
                 set(&mut self.soc_ceiling, new)
             }
-            "max_power_kw" => {
-                set(&mut self.max_power_kw, number_in(&value, name, 0.5..=30.0)?)
-            }
+            "max_power_kw" => set(&mut self.max_power_kw, number_in(&value, name, 0.5..=30.0)?),
             "battery_discharge_kw" => set(
                 &mut self.battery_discharge_kw,
                 number_in(&value, name, MIN_BATTERY_KW..=BATTERY_MAX_KW)?,
@@ -477,6 +505,10 @@ impl Directives {
                 &mut self.battery_charge_kw,
                 number_in(&value, name, MIN_BATTERY_KW..=BATTERY_MAX_KW)?,
             ),
+            "buy_vat_pct" => {
+                let new = percent(&value, name)?;
+                set(&mut self.buy_vat_pct, new)
+            }
             "buy_distribution_czk" => {
                 let new = price(&value, name)?;
                 if new.get() < 0.0 {
@@ -686,7 +718,11 @@ impl Message<ApplyDirective> for DirectivesActor {
             Ok(true) => {
                 save(&self.path, &next).map_err(|e| ApplyError::Persist(e.to_string()))?;
                 self.current = next.clone();
-                let _ = self.state.tell(Update::Directives(Box::new(next))).send().await;
+                let _ = self
+                    .state
+                    .tell(Update::Directives(Box::new(next)))
+                    .send()
+                    .await;
                 Ok(self.current.clone())
             }
             Err(e) => Err(e),
@@ -722,6 +758,7 @@ impl Message<GetCurrent> for DirectivesActor {
 //   {"name":"max_power_kw","type":"number","min":0.5,"max":30.0,"nullable":false,"unit":"kW"}
 //   {"name":"battery_discharge_kw","type":"number","min":0.5,"max":10.24,"nullable":false,"unit":"kW","step":0.1,"label":"Battery discharge limit"}
 //   {"name":"battery_charge_kw","type":"number","min":0.5,"max":10.24,"nullable":false,"unit":"kW","step":0.1,"label":"Battery charge limit"}
+//   {"name":"buy_vat_pct","type":"number","min":0.0,"max":100.0,"nullable":false,"unit":"%","step":0.1}
 //   {"name":"buy_distribution_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
 //   {"name":"buy_seller_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
 //   {"name":"sell_fee_czk","type":"number","min":0.0,"max":10000.0,"nullable":false,"unit":"CZK/kWh","step":0.001}
@@ -894,6 +931,15 @@ pub fn directive_schema() -> serde_json::Value {
             unit: Some("kW"),
             step: Some(0.1),
             label: Some("Battery charge limit"),
+        },
+        DirectiveSpec::Number {
+            name: "buy_vat_pct",
+            min: 0.0,
+            max: 100.0,
+            nullable: false,
+            unit: Some("%"),
+            step: Some(0.1),
+            label: None,
         },
         DirectiveSpec::Number {
             name: "buy_distribution_czk",

@@ -1,18 +1,4 @@
 {
-  "adherence": [
-    {
-      "actual_kw": 7.16,
-      "delta_kw": -0.78,
-      "planned_kw": 7.94,
-      "start": 1793831400
-    },
-    {
-      "actual_kw": -9.24,
-      "delta_kw": -0.4,
-      "planned_kw": -8.84,
-      "start": 1793832300
-    }
-  ],
   "computed_at": 1793872680,
   "days": [
     {
@@ -36,8 +22,8 @@
   "now": 1793875320,
   "steps": [
     {
-      "ac_actual_kw": 7.16,
       "ac_kw": 7.94,
+      "at": "2026-11-04T23:30:00+01:00",
       "command_kw": 8.4,
       "hours": 0.25,
       "kind": "export",
@@ -47,13 +33,12 @@
       "pv_kw": 0.0,
       "reason": "sell 7.90 > stored 5.32 CZK/kWh",
       "reason_kind": "price_above_stored_value",
-      "soc_actual_pct": 62.0,
       "soc_end_pct": 62.5,
       "start": 1793831400
     },
     {
-      "ac_actual_kw": -9.24,
       "ac_kw": -8.84,
+      "at": "2026-11-04T23:45:00+01:00",
       "command_kw": -9.6,
       "hours": 0.25,
       "kind": "import",
@@ -63,13 +48,12 @@
       "pv_kw": 0.0,
       "reason": "buy 3.24 < later 5.32 CZK/kWh",
       "reason_kind": "buy_below_future_value",
-      "soc_actual_pct": 55.1,
       "soc_end_pct": 75.0,
       "start": 1793832300
     },
     {
-      "ac_actual_kw": null,
       "ac_kw": 0.0,
+      "at": "2026-11-05T11:00:00+01:00",
       "command_kw": 0.0,
       "hours": 0.25,
       "kind": "idle",
@@ -79,13 +63,12 @@
       "pv_kw": 2.5,
       "reason": "hold: stored 5.32, best later 8.40 CZK/kWh",
       "reason_kind": "hold_for_later",
-      "soc_actual_pct": null,
       "soc_end_pct": 68.8,
       "start": 1793872800
     },
     {
-      "ac_actual_kw": null,
       "ac_kw": 3.6,
+      "at": "2026-11-05T11:15:00+01:00",
       "command_kw": 3.6,
       "hours": 0.25,
       "kind": "export",
@@ -95,13 +78,12 @@
       "pv_kw": 4.0,
       "reason": "sell 7.20 > stored 5.00 CZK/kWh",
       "reason_kind": "price_above_stored_value",
-      "soc_actual_pct": null,
       "soc_end_pct": 65.6,
       "start": 1793873700
     },
     {
-      "ac_actual_kw": null,
       "ac_kw": 0.0,
+      "at": "2026-11-05T11:30:00+01:00",
       "command_kw": 0.0,
       "hours": 0.25,
       "kind": "idle",
@@ -111,13 +93,12 @@
       "pv_kw": 6.5,
       "reason": "idle",
       "reason_kind": "idle",
-      "soc_actual_pct": null,
       "soc_end_pct": 62.5,
       "start": 1793874600
     },
     {
-      "ac_actual_kw": null,
       "ac_kw": 7.94,
+      "at": "2026-11-05T11:45:00+01:00",
       "command_kw": 8.4,
       "hours": 0.25,
       "kind": "export",
@@ -127,13 +108,12 @@
       "pv_kw": 7.2,
       "reason": "PV 9.5 kW, headroom 1.2 kW",
       "reason_kind": "pv_cannot_be_stored",
-      "soc_actual_pct": null,
       "soc_end_pct": 71.9,
       "start": 1793875500
     },
     {
-      "ac_actual_kw": null,
       "ac_kw": 2.4,
+      "at": "2026-11-05T12:00:00+01:00",
       "command_kw": 0.0,
       "hours": 0.25,
       "kind": "idle",
@@ -143,7 +123,6 @@
       "pv_kw": 5.0,
       "reason": "PV 5.0 kW, headroom 0.0 kW",
       "reason_kind": "pv_cannot_be_stored",
-      "soc_actual_pct": null,
       "soc_end_pct": 65.6,
       "start": 1793876400
     }

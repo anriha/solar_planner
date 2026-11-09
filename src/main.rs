@@ -7,7 +7,6 @@ use solar_controller::{
     bus::{BusActor, LinkConfig, POLL_INTERVAL, Tick, WriteRegister},
     config,
     directives::{Directives, DirectivesActor, GetCurrent, directive_schema},
-    ledger,
     map::{EMBEDDED_MAP, RegisterMap, load_from_str},
     planner::{
         actor::{PLANNER_INTERVAL, PlannerActor, drive as planner_drive, horizon_params},
@@ -19,7 +18,6 @@ use solar_controller::{
     probe,
     server::{self, AppState},
     state::{GetState, StateActor},
-    store::{self, Flush, StoreActor, StoreConfig},
 };
 
 #[derive(Parser)]
@@ -168,17 +166,6 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
         state_ref.clone(),
     ));
 
-    // History: one actor owns the day files, the ledger turns the state fan-out into
-    // per-MTU rows. Both are off the poll path.
-    let store = StoreActor::spawn(StoreActor::new(StoreConfig::new(&cfg.history_dir)?));
-    let store_driver = store.clone();
-    tokio::spawn(async move {
-        if let Err(error) = store::drive(store_driver, store::FLUSH_EVERY).await {
-            eprintln!("[store] driver stopped: {error}");
-        }
-    });
-    let ledger = ledger::spawn(state_ref.clone(), store.clone()).await?;
-
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!(
         "[main] bridge on {} (port {}, poll {}s), directives {}",
@@ -220,7 +207,6 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
         state: state_ref,
         directives: directives_ref.clone(),
         bus: bus_ref.clone(),
-        ledger,
         token: cfg.token,
     };
     tokio::spawn(server::serve(listener, app));
@@ -230,9 +216,6 @@ async fn run(cfg: config::Config) -> anyhow::Result<()> {
         _ = shutdown_signal() => {
             eprintln!("[main] shutting down");
             disarm_on_shutdown(&bus_ref, &directives_ref).await;
-            // The ledger's rows are buffered for up to half an hour; a restart is the common
-            // case, so the graceful path writes them before the process goes.
-            let _ = store.ask(Flush).await;
             Ok(())
         }
     }

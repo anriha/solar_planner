@@ -51,7 +51,8 @@ pub struct PricePoint {
 }
 
 impl PricePoint {
-    /// CZK/kWh — the unit `Slot::price_sell` and `TerminalValue` speak.
+    /// CZK/kWh, **net of VAT** as OTE publishes it — the unit `Slot::price_sell` and
+    /// `TerminalValue` speak, and the term the buy side multiplies by its VAT rate.
     pub fn czk_per_kwh(&self) -> CzkPerKwh {
         CzkPerKwh::new(self.eur_per_mwh * self.eur_rate / 1000.0)
     }
@@ -149,8 +150,7 @@ pub fn parse_prices(xml: &str, rates: &BTreeMap<Date, f64>) -> Result<Vec<PriceP
             .map_err(|_| parse_failed(format!("bad Price {price:?}")))?;
 
         let date = parse_date(raw.date.as_deref())?;
-        let eur_rate =
-            rate_for(date, rates).ok_or(PriceError::MissingRate { date })?;
+        let eur_rate = rate_for(date, rates).ok_or(PriceError::MissingRate { date })?;
         let index: i64 = raw
             .period_index
             .as_deref()
@@ -529,7 +529,9 @@ mod tests {
         assert_eq!(prices[0].mtu.start, FIRST_MTU);
         assert_eq!(prices[287].mtu.start, LAST_MTU);
         assert!(
-            prices.windows(2).all(|w| w[1].mtu.start - w[0].mtu.start == 900),
+            prices
+                .windows(2)
+                .all(|w| w[1].mtu.start - w[0].mtu.start == 900),
             "the response is one quarter-hour grid, in order, with no gaps"
         );
         assert!(prices.iter().all(|p| p.mtu.hours.get() == 0.25));
@@ -544,7 +546,11 @@ mod tests {
 
         let prices = parse_prices(xml, &rates).expect("one priced item is enough to succeed");
 
-        assert_eq!(prices.len(), 1, "the unpriced item is skipped, not zero-filled");
+        assert_eq!(
+            prices.len(),
+            1,
+            "the unpriced item is skipped, not zero-filled"
+        );
         assert_eq!(prices[0].eur_per_mwh, 215.85);
         assert!(
             prices.iter().all(|p| p.eur_per_mwh > 0.0),
@@ -589,10 +595,16 @@ mod tests {
     fn the_request_carries_the_operation_and_both_civil_dates() {
         let body = soap_price_request(day(2026, 11, 4), day(2026, 11, 6));
 
-        assert!(body.contains("<pub:GetDamPricePeriodE>"), "the operation element");
+        assert!(
+            body.contains("<pub:GetDamPricePeriodE>"),
+            "the operation element"
+        );
         assert!(body.contains("<pub:StartDate>2026-11-04</pub:StartDate>"));
         assert!(body.contains("<pub:EndDate>2026-11-06</pub:EndDate>"));
-        assert!(body.contains("PT15M"), "the period resolution is the whole point");
+        assert!(
+            body.contains("PT15M"),
+            "the period resolution is the whole point"
+        );
         assert!(
             body.contains("xmlns:pub=\"http://www.ote-cr.cz/schema/service/public\""),
             "the service namespace, declared on the request prefix"
@@ -633,7 +645,10 @@ mod tests {
         let points: Vec<PricePoint> = (0..4).map(|k| point(FIRST_MTU + k * 900)).collect();
         cache.replace(points, 1_000);
 
-        assert!(cache.covers(FIRST_MTU, FIRST_MTU + 4 * 900), "the window itself");
+        assert!(
+            cache.covers(FIRST_MTU, FIRST_MTU + 4 * 900),
+            "the window itself"
+        );
         assert!(
             !cache.covers(FIRST_MTU, FIRST_MTU + 5 * 900),
             "one MTU past the last published MTU is not covered"

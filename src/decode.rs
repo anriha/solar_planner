@@ -1,4 +1,4 @@
-use crate::map::{BaseWord, ControlDef, Constraint, Encoding, EnumOptions, SensorDef};
+use crate::map::{BaseWord, Constraint, ControlDef, Encoding, EnumOptions, SensorDef};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(untagged)]

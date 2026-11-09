@@ -9,7 +9,8 @@
 //!   Nothing assumes 24 h, 96 MTUs or a fixed UTC offset: a DST day is 92 or 100 MTUs.
 //! * Prices and PV are joined on [`Mtu::start`], never by position — the two sources are
 //!   fetched independently and may be trimmed differently.
-//! * `price_sell = spot − sell_fee`, `price_buy = spot + distribution + seller fee`; `load_kw`
+//! * `price_sell = spot − sell_fee`; `price_buy = spot × (1 + VAT) + distribution + seller
+//!   fee`, where the spot is OTE's net quote and only it carries the tax; `load_kw`
 //!   is the plant's own draw (~0.09 kW), not the house.
 //!
 //! # Refresh policy (2026-11-06, supersedes 2026-11-05)
@@ -70,6 +71,12 @@ pub const RETRY_MAX_SECS: i64 = 1800;
 pub struct HorizonParams {
     /// Deducted from the spot price: `price_sell = spot − sell_fee`.
     pub sell_fee: CzkPerKwh,
+    /// VAT rate applied to the **spot** term of the buy price, percent (21.0 today). The
+    /// day-ahead price is quoted net, so the invoice charges `spot × (1 + buy_vat_pct/100)`;
+    /// the two charges below are already VAT-inclusive and go on top of that. The sell side
+    /// has no VAT term: a household's export revenue is not a taxable supply, so the same
+    /// spot is worth `spot` on one side and `spot × 1.21` on the other.
+    pub buy_vat_pct: f64,
     /// Added to the spot price on every imported kWh: the regulated per-kWh charges
     /// (distribution and the rest), CZK/kWh, VAT included. A directive, because the
     /// distributor's price list changes annually.
@@ -125,7 +132,10 @@ pub fn assemble(
     let forecast: BTreeMap<i64, &PvPoint> = pv.iter().map(|p| (p.mtu.start, p)).collect();
 
     if let Some(last_priced) = priced.keys().next_back().copied() {
-        for mtu_start in forecast.keys().filter(|s| **s >= start && **s <= last_priced) {
+        for mtu_start in forecast
+            .keys()
+            .filter(|s| **s >= start && **s <= last_priced)
+        {
             if !priced.contains_key(mtu_start) {
                 return Err(HorizonError::PvWithoutPrice { start: *mtu_start });
             }
@@ -134,22 +144,26 @@ pub fn assemble(
 
     let slots: Vec<Slot> = priced
         .range(start..)
-        .map(|(mtu_start, price)| Slot {
-            mtu: price.mtu,
-            price_sell: CzkPerKwh::new(price.czk_per_kwh().get() - params.sell_fee.get()),
-            // Buy pays the same spot as sell, plus the two charges — they are the whole
-            // difference between the sides. The charges are constant across MTUs; folding
-            // them in here keeps the solver on one price per direction.
-            price_buy: CzkPerKwh::new(
-                price.czk_per_kwh().get()
-                    + params.buy_distribution.get()
-                    + params.buy_seller_fee.get(),
-            ),
-            pv_kw: forecast
-                .get(mtu_start)
-                .map(|point| point.dc_kwh / price.mtu.hours * params.forecast_calibration)
-                .unwrap_or(DcKw::ZERO),
-            load_kw: params.load_kw,
+        .map(|(mtu_start, price)| {
+            // OTE quotes the commodity **net of VAT**, and the buy side pays the tax on it;
+            // the two charges are the ceník's VAT-inclusive figures, so they are added after
+            // the multiplier rather than inside it. An import therefore has three terms and
+            // an export has one — a deep negative spot is magnified by VAT too, which is
+            // what the invoice does.
+            let spot = price.czk_per_kwh().get();
+            let vat = 1.0 + params.buy_vat_pct / 100.0;
+            Slot {
+                mtu: price.mtu,
+                price_sell: CzkPerKwh::new(spot - params.sell_fee.get()),
+                price_buy: CzkPerKwh::new(
+                    spot * vat + params.buy_distribution.get() + params.buy_seller_fee.get(),
+                ),
+                pv_kw: forecast
+                    .get(mtu_start)
+                    .map(|point| point.dc_kwh / price.mtu.hours * params.forecast_calibration)
+                    .unwrap_or(DcKw::ZERO),
+                load_kw: params.load_kw,
+            }
         })
         .collect();
 
@@ -304,8 +318,7 @@ impl<P: PriceSource, F: PvSource> HorizonActor<P, F> {
         if !self.is_fresh(now) {
             match self.prices.fetch(from, to).await {
                 Ok(points) => {
-                    self.terminal =
-                        TerminalValue::measured(&points, now, self.params.sell_fee);
+                    self.terminal = TerminalValue::measured(&points, now, self.params.sell_fee);
                     self.cache.replace(points, now);
                 }
                 Err(error) => report.prices = Err(error.into()),
@@ -409,6 +422,7 @@ mod tests {
     fn params() -> HorizonParams {
         HorizonParams {
             sell_fee: CzkPerKwh::new(0.5),
+            buy_vat_pct: 21.0,
             buy_distribution: CzkPerKwh::new(2.5),
             buy_seller_fee: CzkPerKwh::new(0.3),
             load_kw: AcKw::new(0.09),
@@ -518,7 +532,10 @@ mod tests {
             .collect();
         let horizon = assemble(&autumn, &[], AUTUMN_DST, &params()).expect("25-hour day");
         assert_eq!(horizon.len(), 100, "a 25-hour day is 100 MTUs, never 96");
-        assert_eq!(horizon.last().expect("non-empty").mtu.start, AUTUMN_DST + 99 * 900);
+        assert_eq!(
+            horizon.last().expect("non-empty").mtu.start,
+            AUTUMN_DST + 99 * 900
+        );
 
         let spring: Vec<PricePoint> = (0..92)
             .map(|k| price(SPRING_DST + k * 900, 250.0))
@@ -528,9 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn sell_is_spot_minus_the_fee_and_buy_is_spot_plus_the_charges() {
-        // 250 EUR/MWh at 25.0 CZK/EUR is 6.25 CZK/kWh; the 0.50 sell fee leaves 5.75, and
-        // the 2.50 distribution + 0.30 seller fee put the buy side at 9.05.
+    fn sell_is_spot_minus_the_fee_and_buy_is_spot_times_vat_plus_the_charges() {
+        // 250 EUR/MWh at 25.0 CZK/EUR is 6.25 CZK/kWh. The 0.50 sell fee leaves 5.75; the
+        // buy side adds VAT to the commodity (6.25 × 1.21 = 7.5625) and then the ceník's
+        // two VAT-inclusive charges, 2.50 + 0.30, for 10.3625.
         let prices = vec![price(T0, 250.0)];
 
         let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
@@ -542,48 +560,80 @@ mod tests {
             slot.price_sell
         );
         assert!(
-            (slot.price_buy.get() - 9.05).abs() < 1e-9,
-            "spot plus distribution and seller fee, got {}",
+            (slot.price_buy.get() - 10.3625).abs() < 1e-9,
+            "spot times VAT plus distribution and seller fee, got {}",
             slot.price_buy
         );
         assert!((slot.load_kw.get() - 0.09).abs() < 1e-9);
     }
 
     #[test]
+    fn vat_moves_the_spot_term_only_never_the_charges() {
+        // The 2026-11-10 rule: OTE quotes the commodity net, the ceník's charges are already
+        // final. So a 21 % rate must move the buy price by exactly 21 % of the spot and
+        // nothing else, and 0 % must reproduce the pre-VAT arithmetic. The sell side is not
+        // a taxable supply and must not move at all.
+        let prices = vec![price(T0, 400.0)]; // 10.00 CZK/kWh spot
+        let mut untaxed = params();
+        untaxed.buy_vat_pct = 0.0;
+
+        let plain = assemble(&prices, &[], T0, &untaxed).expect("assemble");
+        let taxed = assemble(&prices, &[], T0, &params()).expect("assemble");
+
+        assert!(
+            (plain[0].price_buy.get() - 12.8).abs() < 1e-9,
+            "0 % VAT is spot + 2.8, got {}",
+            plain[0].price_buy
+        );
+        assert!(
+            ((taxed[0].price_buy.get() - plain[0].price_buy.get()) - 2.1).abs() < 1e-9,
+            "21 % of a 10.00 spot is 2.10, got {}",
+            taxed[0].price_buy.get() - plain[0].price_buy.get()
+        );
+        assert!(
+            (taxed[0].price_sell.get() - plain[0].price_sell.get()).abs() < 1e-9,
+            "VAT must never reach the sell side"
+        );
+    }
+
+    #[test]
     fn buy_price_tracks_the_spot_instead_of_being_a_constant_tariff() {
         // The 2026-11-06 change: the plant is on spot pricing both ways, so two MTUs at
-        // different spot prices must differ by exactly that much on both sides.
+        // different spot prices must differ by exactly that much on both sides. Since
+        // 2026-11-10 the buy side's difference carries VAT, the sell side's does not.
         let prices = vec![price(T0, 100.0), price(T0 + 900, 400.0)];
 
         let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
 
         let (first, second) = (&horizon[0], &horizon[1]);
         assert!(
-            ((second.price_buy.get() - first.price_buy.get()) - 7.5).abs() < 1e-9,
-            "300 EUR/MWh at 25 CZK/EUR is 7.5 CZK/kWh of spread, got {}",
+            ((second.price_buy.get() - first.price_buy.get()) - 9.075).abs() < 1e-9,
+            "7.5 CZK/kWh of spot spread carries 21 % VAT, got {}",
             second.price_buy.get() - first.price_buy.get()
         );
         assert!(
             ((second.price_sell.get() - first.price_sell.get()) - 7.5).abs() < 1e-9,
-            "the sell side tracks the same spot"
+            "the sell side tracks the same spot, untaxed"
         );
     }
 
     #[test]
     fn a_negative_spot_can_make_buying_cheaper_than_nothing() {
         // Distribution and the seller fee are unavoidable, so a negative spot only turns
-        // the buy price negative once it is deeper than their sum (2.8 in `params`).
-        let prices = vec![price(T0, -300.0), price(T0 + 900, -100.0)];
+        // the buy price negative once its VAT-inclusive value is deeper than their sum
+        // (2.8 in `params`): −7.5 × 1.21 = −9.075 gives −6.275, while −1.25 × 1.21 =
+        // −1.5125 still leaves 1.2875 to pay.
+        let prices = vec![price(T0, -300.0), price(T0 + 900, -50.0)];
         let horizon = assemble(&prices, &[], T0, &params()).expect("assemble");
 
         assert!(
-            (horizon[0].price_buy.get() + 4.7).abs() < 1e-9,
-            "−7.5 spot + 2.8 in charges is −4.7, got {}",
+            (horizon[0].price_buy.get() + 6.275).abs() < 1e-9,
+            "−7.5 spot × 1.21 + 2.8 in charges is −6.275, got {}",
             horizon[0].price_buy.get()
         );
         assert!(
             horizon[1].price_buy.get() > 0.0,
-            "−2.5 spot + 2.8 is still a positive price, got {}",
+            "−1.25 spot × 1.21 + 2.8 is still a positive price, got {}",
             horizon[1].price_buy.get()
         );
     }
@@ -746,9 +796,7 @@ mod tests {
             report.prices
         );
 
-        let horizon = actor
-            .build(T0)
-            .expect("a stale window is still a horizon");
+        let horizon = actor.build(T0).expect("a stale window is still a horizon");
         assert_eq!(horizon.len(), 4, "the old window survives a failed refresh");
     }
 
@@ -823,7 +871,11 @@ mod tests {
             actor.refresh(T0 + 60).await.is_none(),
             "a 60 s tick must not spend a request"
         );
-        assert_eq!(pv_calls.load(Ordering::SeqCst), 1, "one PV request, not two");
+        assert_eq!(
+            pv_calls.load(Ordering::SeqCst),
+            1,
+            "one PV request, not two"
+        );
         assert!(
             actor.refresh(T0 + REFRESH_FLOOR_SECS).await.is_some(),
             "the floor has passed"
@@ -982,7 +1034,9 @@ mod tests {
 
         actor.refresh(T0).await.expect("the first attempt is due");
 
-        let terminal = actor.terminal().expect("a full week of prices measures one");
+        let terminal = actor
+            .terminal()
+            .expect("a full week of prices measures one");
         assert!(
             (terminal.czk_per_kwh.get() - 5.75).abs() < 1e-9,
             "250 EUR/MWh at 25 CZK/EUR is 6.25 CZK/kWh, minus the 0.5 fee; got {}",

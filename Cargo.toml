@@ -3,15 +3,6 @@ name = "solar_controller"
 version = "0.1.0"
 edition = "2024"
 
-# The bridge is the default member: `cargo build`/`cargo test` at the root must keep
-# producing the aarch64-musl Pi binary and must not drag the viewer's eframe tree into
-# that build. The viewer is built on demand with `-p viewer`, and for the browser with
-# trunk (see viewer/index.html).
-[workspace]
-members = ["viewer"]
-default-members = ["."]
-resolver = "3"
-
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }

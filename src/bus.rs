@@ -250,9 +250,18 @@ pub enum WriteError {
     #[error("{name} @ {address}: not writable")]
     NotWritable { name: String, address: u16 },
     #[error("{name} @ {address}: {reason}")]
-    Invalid { name: String, address: u16, reason: String },
+    Invalid {
+        name: String,
+        address: u16,
+        reason: String,
+    },
     #[error("{name} @ {address}: wrote {written:#06x}, read back {read:#06x}")]
-    Readback { name: String, address: u16, written: u16, read: u16 },
+    Readback {
+        name: String,
+        address: u16,
+        written: u16,
+        read: u16,
+    },
     #[error("{name} @ {address}: {source}")]
     Io {
         name: String,
@@ -338,9 +347,10 @@ fn encode_write_inner(
             v as i64
         }
         Constraint::Time => match value {
-            serde_json::Value::String(s) => i64::from(parse_hhmm(s).ok_or_else(|| {
-                invalid(format!("expected HH:MM (00:00-23:59), got {s:?}"))
-            })?),
+            serde_json::Value::String(s) => i64::from(
+                parse_hhmm(s)
+                    .ok_or_else(|| invalid(format!("expected HH:MM (00:00-23:59), got {s:?}")))?,
+            ),
             serde_json::Value::Number(n) => {
                 let Some(x) = n.as_f64() else {
                     return Err(invalid("expected HH:MM".into()));
@@ -350,9 +360,7 @@ fn encode_write_inner(
                 }
                 let v = x.round() as i64;
                 if !(0..=2359).contains(&v) || v % 100 > 59 {
-                    return Err(invalid(format!(
-                        "{v} is not a valid HHMM (00:00-23:59)"
-                    )));
+                    return Err(invalid(format!("{v} is not a valid HHMM (00:00-23:59)")));
                 }
                 v
             }
@@ -396,10 +404,13 @@ pub struct WriteRegister {
 }
 
 async fn write_register(ctx: &mut Context, addr: u16, raw: u16) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(2), ctx.write_multiple_registers(addr, &[raw]))
-        .await
-        .map_err(|_| anyhow!("no write response within 2s"))??
-        .map_err(|e| anyhow!("slave exception {e:?}"))
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        ctx.write_multiple_registers(addr, &[raw]),
+    )
+    .await
+    .map_err(|_| anyhow!("no write response within 2s"))??
+    .map_err(|e| anyhow!("slave exception {e:?}"))
 }
 
 impl Message<WriteRegister> for BusActor {
@@ -419,7 +430,10 @@ impl Message<WriteRegister> for BusActor {
             .clone();
         let needs_current = matches!(
             &control.constraint,
-            Constraint::Switch { bitmask: Some(_), .. }
+            Constraint::Switch {
+                bitmask: Some(_),
+                ..
+            }
         );
 
         // Bit-field writes must read the register first so neighbouring flags

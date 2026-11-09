@@ -38,13 +38,17 @@ fn unknown_field_rejected() {
 
 #[test]
 fn missing_required_field_rejected() {
-    assert!(load_str("port=\"/dev/x\"\nbaud=9600\nslave=1\ninterval_secs=5\nbind=\"b\"\n").is_err());
+    assert!(
+        load_str("port=\"/dev/x\"\nbaud=9600\nslave=1\ninterval_secs=5\nbind=\"b\"\n").is_err()
+    );
 }
 
 #[test]
 fn wrong_type_rejected() {
-    assert!(load_str(
-        "port=\"/dev/x\"\nbaud=\"fast\"\nslave=1\ninterval_secs=5\nbind=\"b\"\ntoken=\"t\"\n"
-    )
-    .is_err());
+    assert!(
+        load_str(
+            "port=\"/dev/x\"\nbaud=\"fast\"\nslave=1\ninterval_secs=5\nbind=\"b\"\ntoken=\"t\"\n"
+        )
+        .is_err()
+    );
 }

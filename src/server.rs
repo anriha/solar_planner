@@ -7,8 +7,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
-    extract::Path as UrlPath,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -16,10 +15,9 @@ use kameo::actor::ActorRef;
 
 use crate::{
     bus::{BusActor, WriteRegister},
-    ledger::{LedgerActor, QueryRows},
     directives::{ApplyDirective, Directives, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
-    state::{GetState, StateActor, Subscribe, Unsubscribe, WatchPlan},
+    state::{GetState, StateActor, Subscribe, Unsubscribe},
     view::View,
 };
 
@@ -40,7 +38,6 @@ pub struct AppState {
     pub state: ActorRef<StateActor>,
     pub directives: ActorRef<DirectivesActor>,
     pub bus: ActorRef<BusActor>,
-    pub ledger: ActorRef<LedgerActor>,
     pub token: String,
 }
 
@@ -50,14 +47,11 @@ pub async fn serve(listener: tokio::net::TcpListener, app: AppState) -> anyhow::
         .route("/state", get(state_handler))
         .route("/meta", get(meta_handler))
         .route("/directives", get(directives_handler))
-        // The viewer: a static shell plus its wasm, same origin as the socket so there is no
-        // CORS and no mixed content (board-b0o).
-        .route("/", get(root_redirect))
-        // The viewer: a browser shell plus its wasm, served out of this binary's own memory
-        // (board-b0o). Same origin as the socket, so no CORS and no mixed content.
-        .route("/app", get(app_root))
-        .route("/app/", get(app_index))
-        .route("/app/{*path}", get(app_asset))
+        // What the dashboards read: the metrics family for Prometheus, and the horizon for
+        // Grafana's JSON datasource. Both are `get` and both are idempotent views of the
+        // same in-memory state, so a scrape can never move the plant.
+        .route("/metrics", get(metrics_handler))
+        .route("/plan.json", get(plan_json_handler))
         .with_state(app);
     // Connect info powers the peer address in the connection log lines.
     axum::serve(
@@ -204,12 +198,6 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
                     },
                 }
             }
-            Ok(ClientMsg::GetView {
-                id,
-                from,
-                to,
-                history,
-            }) => view_reply(&app, conn_id, id, from, to, history).await,
             Err(e) => ServerMsg::Error {
                 message: format!("malformed message: {e}"),
             },
@@ -226,96 +214,64 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
     eprintln!("[server] {peer}: closed");
 }
 
-/// The `get_view` reply: the flat plan projection over the requested window (board-zpe).
+/// Prometheus text exposition (see [`crate::metrics`]).
 ///
-/// Registering the watch comes **before** the reply is sent. A plan published in the gap
-/// between the two would otherwise never reach this connection, and the viewer would sit on
-/// a chart it has no way to refresh until it reconnects.
-///
-/// The watch is only an "ask again" notice ([`ServerMsg::PlanChanged`]): the window lives in
-/// the request, so it is always the client's own window that gets re-drawn.
-async fn view_reply(
-    app: &AppState,
-    conn_id: u64,
-    id: String,
-    from: Option<i64>,
-    to: Option<i64>,
-    history: Option<i64>,
-) -> ServerMsg {
-    if let (Some(from), Some(to)) = (from, to)
-        && to <= from
-    {
-        return ServerMsg::Error {
-            message: format!("get_view: empty window {from}..{to}"),
-        };
-    }
-    let Ok(payload) = app.state.ask(GetState).await else {
-        return ServerMsg::Error {
-            message: "state actor unavailable".into(),
-        };
-    };
-    let _ = app.state.tell(WatchPlan(conn_id)).send().await;
+/// One scrape answers from the state actor, so it is a snapshot of a single poll — not a mix
+/// of two frames — and the content type carries the format version Prometheus expects.
+async fn metrics_handler(State(app): State<AppState>) -> Response {
     let now = jiff::Timestamp::now().as_second();
-    // `history` is the client saying "a week back plus your horizon" without having to know
-    // its own clock agrees with the bridge's. The window is resolved once, here, so the
-    // ledger read and the projection cannot disagree about what was asked for.
-    let from = from.or_else(|| history.map(|seconds| now - seconds.clamp(0, crate::view::MAX_WINDOW_SECS)));
+    match app.state.ask(GetState).await {
+        Ok(payload) => (
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            crate::metrics::render(&payload, now),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state actor unavailable\n",
+        )
+            .into_response(),
+    }
+}
+
+/// The horizon as JSON, for Grafana's Infinity datasource.
+///
+/// The horizon in the flat shape of [`crate::view::View`]. `from`/`to` default to the plan's
+/// own horizon; `history` is "that many seconds back from now plus the horizon", resolved with
+/// the bridge's clock. This endpoint is the *future*: a dashboard that wants the measured side
+/// reads Prometheus.
+async fn plan_json_handler(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok(payload) = app.state.ask(GetState).await else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state actor unavailable\n",
+        )
+            .into_response();
+    };
+    let now = jiff::Timestamp::now().as_second();
+    let from = query
+        .get("from")
+        .and_then(|value| value.parse::<i64>().ok());
+    let to = query.get("to").and_then(|value| value.parse::<i64>().ok());
+    let history = query
+        .get("history")
+        .and_then(|value| value.parse::<i64>().ok());
+    let from = from
+        .or_else(|| history.map(|seconds| now - seconds.clamp(0, crate::view::MAX_WINDOW_SECS)));
     let (from, to) = crate::view::window_for(payload.plan.as_ref(), from, to, now);
-    let rows = app
-        .ledger
-        .ask(QueryRows { from, to })
-        .await
-        .unwrap_or_default();
-    ServerMsg::View {
-        id,
-        view: View::of_plan(payload.plan.as_ref(), Some(from), Some(to), now, &rows),
-    }
-}
-
-/// `/` is the API root for nothing; send a browser that lands here to the viewer.
-async fn root_redirect() -> Redirect {
-    Redirect::temporary("/app/")
-}
-
-async fn app_root() -> Redirect {
-    Redirect::temporary("/app/")
-}
-
-async fn app_index() -> Response {
-    serve_asset("")
-}
-
-async fn app_asset(UrlPath(path): UrlPath<String>) -> Response {
-    serve_asset(&path)
-}
-
-/// Serve one embedded file.
-///
-/// The bundle is **not** behind the token, and that is deliberate: it carries no plant data, and
-/// a multi-megabyte wasm fetched with `?token=` puts the secret in Referer headers and proxy logs.
-/// Everything that does carry data (the socket) still requires it.
-///
-/// Hashed trunk filenames never change content, so they are cached hard; the html is not, because
-/// that is what points at the new hashes.
-fn serve_asset(path: &str) -> Response {
-    match crate::assets::get(path) {
-        Some((bytes, content_type)) => {
-            let cache = if content_type.starts_with("text/html") {
-                "no-cache"
-            } else {
-                "public, max-age=31536000, immutable"
-            };
-            (
-                [
-                    (header::CONTENT_TYPE, content_type),
-                    (header::CACHE_CONTROL, cache),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "no such asset\n").into_response(),
-    }
+    Json(View::of_plan(
+        payload.plan.as_ref(),
+        Some(from),
+        Some(to),
+        now,
+    ))
+    .into_response()
 }
 
 async fn state_handler(State(app): State<AppState>) -> Response {

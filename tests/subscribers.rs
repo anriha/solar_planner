@@ -35,9 +35,7 @@ fn plan() -> Plan {
             price_sell: CzkPerKwh::new(5.3),
             price_buy: CzkPerKwh::new(3.4),
             pv_kw: DcKw::new(8.0),
-            action: Action::Export {
-                kw: AcKw::new(6.0),
-            },
+            action: Action::Export { kw: AcKw::new(6.0) },
             battery_out_kwh: DcKwh::new(1.5),
             ac_kwh: AcKwh::new(1.5),
             energy_after_kwh: DcKwh::new(21.4),
@@ -147,7 +145,10 @@ async fn the_plan_is_its_own_frame_not_part_of_the_poll() {
     state.ask(Update::Good(snap(2))).await.unwrap();
     let telemetry = recv(&mut rx).await.expect("telemetry frame");
     assert!(
-        serde_json::to_value(&telemetry).unwrap().get("plan").is_none(),
+        serde_json::to_value(&telemetry)
+            .unwrap()
+            .get("plan")
+            .is_none(),
         "the plan goes out on change, not again with every poll"
     );
 }
@@ -192,6 +193,8 @@ async fn a_lagging_connection_is_handed_the_plan_again_when_it_catches_up() {
     state.ask(Update::Good(snap(3))).await.unwrap();
     let caught_up = recv(&mut rx).await.expect("telemetry frame");
     assert!(matches!(caught_up, ServerMsg::State { ts: 3, .. }));
-    let replay = recv(&mut rx).await.expect("plan replayed after catching up");
+    let replay = recv(&mut rx)
+        .await
+        .expect("plan replayed after catching up");
     assert!(matches!(replay, ServerMsg::Plan { .. }));
 }

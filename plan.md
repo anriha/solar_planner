@@ -331,9 +331,11 @@ moved 14.8 / 16.3 / 16.8 kWh on Oct 31–Nov 2). The planner goes live immediate
    `?currency=EUR` and returns all 30 rows: filter `currencyCode == "EUR"` and divide `rate` by
    `amount` (24.34 CZK/EUR on 2026-11-03).
 2. **Tariff** — spot both ways (corrected 2026-11-06; the flat tariff was wrong — see the
-   spot-buy section at the end): sell = `spot − sell_fee`; buy = `spot + distribution + seller
-   fee`. Settled values `sell_fee 0.5`, `distribution 2.515`, `seller fee 0.3` (`300 CZK/MWh`),
-   all CZK/kWh, **VAT included** — the ceník's numbers are already final, so no VAT knob exists.
+   spot-buy section at the end): sell = `spot − sell_fee`; buy = `spot × (1 + VAT) + distribution
+   + seller fee` (VAT amended 2026-11-10 — see the VAT section at the end). Settled values
+   `sell_fee 0.5`, `VAT 21 %`, `distribution 2.515`, `seller fee 0.3` (`300 CZK/MWh`),
+   all CZK/kWh. The distribution and seller fee are the ceník's final, VAT-inclusive numbers;
+   **only the spot is a net quote**, which is why exactly it takes the multiplier.
 3. **Method** — **dynamic programming** over a discretized battery-energy grid (`V_t(E)`,
    forward argmax walk, marginal value by finite difference = the explanation). Chosen because the
    actuator is window+setpoint shaped, `η(P)` must sit inside the objective (slow-drain vs burst),
@@ -717,11 +719,12 @@ tariff. The plant is on **spot pricing both ways**: what it pays is the day-ahea
 regulated per-kWh charges plus the supplier's fee, so the buy side moves MTU by MTU and can go
 negative on a deep negative spot.
 
-The rule, all CZK/kWh, **VAT included** (the ceník's numbers are final; there is deliberately no
-VAT factor to double-count):
+The rule, all CZK/kWh, **the two charges VAT included** (their ceník figures are final). The spot
+term was missing its VAT here and is corrected in the 2026-11-10 section at the end: OTE quotes
+the commodity net, so the buy side now reads `spot × (1 + buy_vat_pct/100) + 2.515 + 0.3`.
 
 ```
-price_buy = spot + buy_distribution_czk + buy_seller_fee_czk
+price_buy = spot + buy_distribution_czk + buy_seller_fee_czk     (pre-2026-11-10, wrong)
           = spot + 2.515 + 0.3
 price_sell = spot − sell_fee_czk            (0.5, unchanged — its own fee, not the buy one)
 ```
@@ -1107,3 +1110,292 @@ by more than 0.05 kW, so the gap is explained rather than hidden. Holds keep rea
 a hold that sells still reads its surplus in the description. Pinned by two new cases in
 `tests/test_plan_view.py` (an import 9.6 → 8.8 kW, an export 8.4 → 7.9 kW); the legacy-payload
 test still falls back to the command when `ac_kwh` is absent. `python3 -m unittest` 15 passed.
+
+### Phase 3a state (2026-11-09, twentieth session) — Grafana is the surface, the bridge only feeds it
+
+The viewer question was re-opened from the other end: *should this exist at all?* It should not.
+The fleet already runs the machinery, and the plant's data is already in it — so the custom
+history viewer proposed the same day was deleted before it was written.
+
+- **What already exists (measured, not assumed).** HA's `prometheus:` integration is enabled and
+  nina scrapes `192.168.1.187:8123/api/prometheus` every 1 min. Thanos ships those blocks to
+  Garage S3 and retains **raw/5m/1h for 5 years**. `homeassistant_sensor_energy_kwh{entity=
+  "sensor.deye_…pv_energy_total"}` queried through Thanos returns **41 continuous daily points,
+  2026-09-29 → 2026-11-09**, 78.8 → 1112.2 kWh. Every odometer, SOC, power and temperature is
+  already a series there.
+- **The three things the stack could not see** are the ones only the bridge knows: the price the
+  plan is priced with, the PV belief it acted on, and its own command. Hence `GET /metrics`
+  (`src/metrics.rs`): six odometer counters passed through unchanged, gauges for power/SOC/
+  temperatures, `solar_price_buy_czk_per_kwh` / `_sell_` as MTU step functions,
+  `solar_forecast_pv_kw`, `solar_plan_power_kw`, `solar_plan_net_czk_horizon`,
+  `solar_forecast_pv_kwh_remaining_today`, and quality gauges (`solar_bridge_up`,
+  `solar_link_ok`, `solar_state_age_seconds`). **A missing value emits no metric, never a zero** —
+  the register-619 lesson.
+- **The plan is a view, not a record.** No time-series store can hold a mutable future timeline:
+  a re-write of a future timestamp is an overwrite an append-only store refuses, and a store that
+  accepts it only lets the newest writer win over the plan that was actually in force. So the
+  horizon is served: `GET /plan.json` returns the same flat projection `get_view` does (from/to/
+  history params), for Grafana's Infinity datasource. Forecast *history* stays Prometheus-shaped
+  because the belief is recorded at issue time, not as a future timeline.
+- **`Action::kind` / `Action::signed_kw`** now exist on the type; the plan projection and the
+  ledger had their own copies of that `match` and one more was about to appear in the metrics.
+- **Verified**: `cargo test --all-targets` **231 passed / 0 failed / 3 ignored** (new:
+  `metrics` 11 unit tests pinning the exposition line by line, and
+  `metrics_and_plan_json_are_views_of_the_same_state` end-to-end over TCP); clippy clean apart
+  from the four pre-existing lints. `monitoring/` carried the scrape module, the recording rules
+  (6, validated with `yq`) and two Grafana dashboards as JSON.
+- **Not built, on purpose**: dashboards are starting points and were not imported anywhere; the
+  Infinity panel is documented as a target block in the monitoring README rather than shipped
+  as a dashboard, because the plugin's target schema moves between versions. The egui viewer is
+  **frozen, not yet deleted** — it is still the only surface showing the horizon until the
+  Infinity panel exists.
+- **Still open**: `/state`, `/meta`, `/directives` and now `/metrics`, `/plan.json` answer without
+  the token (the fifteenth session's note, unchanged). The ledger was deleted in the twenty-first
+  session, so the changes that design note proposed are moot.
+
+### Phase 3a state (2026-11-09, twenty-first session) — the ledger is deleted
+
+The ledger existed to answer "what was planned vs what the meter did, per MTU". Once Prometheus
+was shown to hold every odometer with five-year retention, it was a second record of the same
+energy, with its own retention policy, its own actor and its own sign flip. Owner's call: remove
+it. Removed:
+
+- `src/ledger.rs`, `src/store.rs` (its only producer), `tests/ledger.rs`, the `StoreActor` /
+  `LedgerActor` wiring in `main.rs`, the flush-on-shutdown, and `Config::history_dir`.
+- `telemetry::MeteredSignals` — the AC-meter extraction existed for the ledger and nothing else;
+  the 607-vs-619 measurement stays in the register map, in `/metrics`' help text and in this
+  journal.
+- The measured half of the plan projection: `View::of_plan` lost its `rows` parameter, and
+  `adherence[]`, `ac_actual_kw`, `soc_actual_pct` are gone from the payload. The projection is
+  **the plan alone** — a mutable future that no time-series store holds — and everything that
+  already happened is read from Prometheus.
+- The frozen wasm viewer lost its adherence strip and its measured SOC line to match (13 tests
+  still pass, both native and wasm targets).
+
+**What is lost on purpose:** per-MTU intent — what the plan commanded for a closed quarter hour
+and why — is no longer recorded anywhere machine-readable. Grafana shows what happened,
+`/plan.json` what is about to happen, and a decision older than the current plan survives only in
+the journal. That is an accepted trade for deleting a second energy record.
+
+**Also on 2026-11-09**: `GET /metrics` (Prometheus exposition: odometer counters, power/SOC/
+temperature gauges, the MTU price step functions, the forecast belief the planner acted on, the
+plan's command and quality gauges) and `GET /plan.json` (the flat horizon for Grafana's Infinity
+datasource).
+
+**Verified**: `cargo test --all-targets` **217 passed / 0 failed / 3 ignored**, `cargo test -p
+viewer` 13, `cargo check -p viewer --target wasm32-unknown-unknown` green, `python3 -m unittest`
+15, clippy unchanged (four pre-existing lints), and `nix build .#solar-bridge-arm` exit 0 from a
+git-tracked copy. **Not deployed**: the Pi still runs the ledger binary; its
+`~/solar-bridge/history/` directory is now orphaned and can be removed by hand.
+
+### Phase 3a state (2026-11-09, twenty-second session) — the viewer is deleted
+
+After the ledger went, the viewer was the only thing left holding a copy of the plan projection
+for a UI nobody needed: Grafana draws the history, and `/plan.json` is the horizon. Deleted with
+everything that existed to serve it:
+
+- `viewer/` (the eframe/egui crate, its wasm target and the `index.html` shell), `build.rs` and
+  `src/assets.rs` — the binary no longer embeds a UI, so there is no `/app` route, no static
+  asset table, and no `trunk` in the devshell.
+- The websocket projection path that only the browser used: `ClientMsg::GetView`,
+  `ServerMsg::View`, `ServerMsg::PlanChanged`, `state::WatchPlan`, the per-connection
+  `watches_plan` flag and the catch-up notice. `ServerMsg::Plan` remains — Home Assistant reads
+  it — and `/plan.json` (HTTP) serves the flat projection for Grafana.
+- Workspace plumbing: the viewer was the workspace's only member, so `[workspace]` is gone and
+  the root package stands alone; `flake.nix` lost `packages.wasm`, the `wasm-bindgen-cli_0_2_126`
+  pin, the `embedViewer` preBuild and the wasm32 target; `just web` / `just web-nix` are gone.
+- Three tests went with it (the `/app` shell, the get_view round trip, the never-asked notice);
+  the `/plan.json` + `/metrics` end-to-end test stays and now asserts the payload carries no
+  measured half at all.
+
+**Contract now**: `/metrics` for what happened (scraped to Prometheus), `/plan.json` for what is
+about to happen (Grafana Infinity), `/ws` for Home Assistant. Nothing else in the binary renders
+anything.
+
+**Verified**: `cargo test --all-targets` **211 passed / 0 failed / 3 ignored**, `python3 -m
+unittest` 15, clippy unchanged (four pre-existing lints), `nix eval` of both packages green, and
+`nix build .#solar-bridge-arm .#default` exit 0 from a git-tracked copy. **Not deployed**.
+
+### Phase 3a state (2026-11-09, twenty-third session) — dashboards move to the dotfiles, repo cleaned
+
+The monitoring configuration now lives where the stack's configuration lives, and the repo keeps
+only the controller.
+
+- **`~/.dotfiles/nina/solar.nix`** (imported by `nina/configuration.nix`) wires the read side:
+  the `solar` scrape job (`100.64.0.9:8300/metrics`, 15 s, 10 s timeout), the six recording rules
+  in `nina/solar/solar.rules.yml`, and Grafana dashboard provisioning from
+  `nina/solar/dashboards/` — folder `Solar`, `allowUiUpdates = false`, `disableDeletion = true`,
+  60 s reload. Verified by evaluating the NixOS config from a git-tracked copy: the job list now
+  starts with `solar`, the rules path resolves to a store copy, and the provider's `options.path`
+  points at the dashboards directory.
+- **Dashboards are provisioned files, not UI state.** Both carry a description saying the
+  datasource must be Thanos, not the 14-day local Prometheus; the datasource variable no longer
+  guesses a name.
+- **Repo cleanup** (owner's call — "lots of things here that shouldn't be"): deleted `design/`,
+  `monitoring/` (moved), the raw mode dumps `chg.txt` / `dischg.txt`, and the vestigial Python
+  scaffold (`pyproject.toml` with a non-existent entry point, `uv.lock`, `.python-version`,
+  `.venv`, `.ruff_cache`) — the HA component is tested with plain `unittest` and needs none of
+  it. Local artifacts (`.direnv`, `__pycache__`, the `result` symlink) removed; `target/` kept as
+  the build cache.
+- **The suite is unchanged**: `cargo test --all-targets` **211 passed / 0 failed / 3 ignored**,
+  `python3 -m unittest` 15.
+
+### Phase 3b state (2026-11-09, twenty-fourth session) — the plan becomes visible, and gets a history
+
+Deployed and asked for what was promised but never built: the horizon was served at `/plan.json`
+and nothing read it, and the plan had no history beyond three gauges. Both are now real.
+
+**Seeing the plan.** Grafana had zero provisioned datasources and no plugins, so no panel could
+have read the JSON. `nina/solar.nix` now declares `services.grafana.declarativePlugins` (Infinity
+4.1.0 from the pinned nixpkgs) and provisions a datasource with `uid = "solar-plan"` at the
+bridge — the `uid` is what makes the panel portable, because `${ds}` is a Prometheus selector and
+cannot reach a JSON endpoint. The `Solar — now` dashboard gained a ten-column table over
+`/plan.json` (start, action, commanded kW, metered kW, PV, both prices, SOC at MTU end, net CZK,
+and the reason in words).
+
+`steps[].at` was added to the projection (`2026-11-09T20:05:00+01:00`) because a JSON datasource
+cannot type an epoch column as time without the caller guessing the unit, and a human reading
+`/plan.json` should not convert 1 792 000 000 in their head. `start` is still there for arithmetic.
+
+**History.** A mutable future timeline cannot be a series, so the plan's *shape* stays a document.
+What a series can hold is the aggregate belief, recorded per scrape: four label-free gauges —
+`solar_plan_expected_{net_czk,export_kwh,import_kwh}_rest_of_day` and
+`solar_plan_expected_soc_end_of_day_pct`. Read forwards they say what the plan still expects of
+the day; read across scrapes they are the revision history of that belief, and at midnight the
+last value is the day's forecast to compare with what the rules recorded. Cardinality is fixed at
+four: one series per future MTU would be 96 a day, unbounded, for a question nobody asks.
+
+Panels: `Committed vs delivered, last 6 h` (the commanded rung as a step function against
+`-solar_grid_power_w`, sign flipped because the plan is export-positive and register 607 is not),
+four `Expected …` stats, and on `Solar — history` "How the day's expectation moved", plus
+"Plan vs delivered export" and "Plan vs earned" over rolling 24 h windows.
+
+**Verified**: `cargo test --all-targets` **213 passed / 0 failed / 3 ignored** (two new metrics
+tests, the view fixture regenerated for `at`), clippy unchanged (four pre-existing lints), and the
+NixOS config evaluates from a git-tracked copy with the plugin, the datasource `uid`, and the
+dashboards path resolving. Every `/plan.json` column selector was checked against a live response
+— only `at` is missing until the bridge is redeployed. **Not deployed.**
+
+### Phase 3c (2026-11-09) — the datasource variable was the trap
+
+Deployed, and the plan was still "nowhere". Grafana's own logs say otherwise and say where it
+broke: the browser ran the plan panel successfully twice (`url=http://100.64.0.9:8300/plan.json`,
+`root_selector=steps`, `status=ok`), and twice sent a *blank* Infinity query (`url=` empty,
+`root_selector=` empty) which fell back to the datasource's base URL, asked the bridge for `/`,
+and got a 404 — `status code : 404 Not Found`.
+
+The real defect was the dashboard's `Data source` variable, filtered to `query: "prometheus"`.
+It cannot list the Infinity datasource (so it "cannot be selected"), and with `current: {}` it
+resolves to the *default* datasource, which on nina is `Prometheus` at `192.168.1.100:9090` —
+14 days — not `thanos` at `127.0.0.1:12902`. Every money panel was pointed at the store the
+dashboard description warns about, and would have truncated silently after two weeks.
+
+Fixed by removing the variable and pinning every panel to a uid, and by provisioning both
+datasources so those uids are contracts rather than whatever the UI happened to create:
+
+- `thanos`, uid `eehgs90hmn7k0d`, `http://127.0.0.1:12902` (provisioned now, so read-only in the
+  UI — edits go through Nix);
+- `solar-plan`, uid `solar-plan`, the bridge.
+
+Evidence that the pinning is to the right store: for 2026-10-20, `:12902` returns 25 points of
+the PV odometer and `192.168.1.100:9090` returns none.
+
+### Phase 3d (2026-11-09) — the horizon is a graph, not a table
+
+The table was the wrong shape for it. `/plan.json` now renders as three stepped time series on
+`Solar — now`, each an Infinity query with `format = timeseries` and `start` typed
+`timestamp_epoch_s` (Infinity turns that into a Grafana time field; verified through
+`/api/ds/query`, 114 rows per frame, `Time` + numeric fields):
+
+- **what it commands and what it prices** — `command_kw` against `ac_kw`, the gap being the
+  plant's own round trip (8.4 kW commanded, 7.9 kW metered on an export on 2026-11-08);
+- **the prices it is acting on** — `price_sell` / `price_buy`;
+- **where it expects the battery to be** — `soc_end_pct`.
+
+All three use `lineInterpolation: stepAfter`. An MTU is piecewise constant, so a linear segment
+would draw a ramp the inverter never performs; the dashed line distinguishes the command from the
+costed power. Window is `now-6h → now+24h`; the horizon is ~35 h, so its tail is clipped by the
+view, not by the query.
+
+### Tariff (2026-11-10) — the spot price is quoted without VAT
+
+Reported as "buy price should also include VAT pricing. Probably only for the spot prices
+themselves, distribution already has it in, and the sellers fee presumably too."
+
+Correct, and the miss was one term. `assemble` built the buy side from
+`PricePoint::czk_per_kwh()` — `eur_per_mwh × eur_rate / 1000`, OTE's **net** day-ahead quote —
+and added the two charges without ever applying the tax to the commodity. Every import was
+therefore priced 21 % of the spot too cheap (1.31 CZK/kWh at a 6.25 spot), which is enough to
+shift the import gate and the grid-arbitrage decision.
+
+The rule now (CZK/kWh):
+
+```
+price_buy  = spot × (1 + buy_vat_pct/100) + buy_distribution_czk + buy_seller_fee_czk
+           = spot × 1.21 + 2.515 + 0.3
+price_sell = spot − sell_fee_czk            (unchanged)
+```
+
+The multiplier sits on the spot term **alone**: the ceník's distribution and supplier fee are
+final, VAT-inclusive numbers, so a factor over the whole sum would double-tax them. The sell
+side keeps no VAT term on purpose — a household's export revenue is not a taxable supply, so the
+same spot is worth `spot` when exported and `spot × 1.21` when imported. `TerminalValue` is
+sell-side and stays untouched.
+
+`buy_vat_pct` is a **directive** (default **21.0**, `%`, step 0.1, range 0–100 by the `Percent`
+newtype), because the rate is set by law, not by the build. `serde(default)` so the Pi's live
+`directives.json`, which has no such key, loads at 21 rather than at 0 — a missing tax is the
+exact bug this fixes, and the migration test pins it. The HA integration generates the number
+entity from `meta.directives` with no Python change.
+
+Where it lands: `HorizonParams.buy_vat_pct` → `assemble` (one expression), `actor::horizon_params`
+maps the directive through, `Slot`/`PlanStep`/`metrics` doc strings corrected, and
+`examples/solve_bench.rs` prices its synthetic horizon the same way. Nothing else reads spot.
+
+Consequence worth recording: **the buy−sell gap is no longer constant.** It was 3.315 CZK/kWh
+(2.515 + 0.3 + 0.5); it is now `0.21 × spot + 3.315` — 4.6275 at a 6.25 spot, 5.415 at 10. So
+grid-charging to re-sell needs a wider peak-to-trough spread the higher the cheap hour sits:
+with η ≈ 0.92, buying at 2.00 and selling later turns a profit only above
+`0.5 + (1.21 × 2.00 + 2.815)/0.92 ≈ 6.19` CZK/kWh (spread ≈ 4.19, was ≈ 3.73). The DP already
+prices this exactly; the number is here so the next person does not re-derive it from the old
+constant. A deep negative spot is *more* attractive now, in both directions: the credit grows by
+21 % too, which is what the invoice does.
+
+Tests: `vat_moves_the_spot_term_only_never_the_charges` pins the 21 %-of-spot delta and the
+0 %-VAT baseline; `sell_is_spot_minus_the_fee_and_buy_is_spot_times_vat_plus_the_charges`,
+`buy_price_tracks_the_spot_instead_of_being_a_constant_tariff` and
+`a_negative_spot_can_make_buying_cheaper_than_nothing` carry the new arithmetic (6.25 spot →
+10.3625 buy; 7.5 spread → 9.075 on the buy side, 7.5 on the sell side). `tests/directives.rs`
+pins the 21.0 default, the range rejection, the legacy-file default and the frozen schema entry.
+
+`cargo test` **214 passed / 0 failed / 3 ignored** (98 lib + 116 integration), `cargo fmt`
+clean, and clippy reports only the three warnings that predate the change.
+
+**Deployed and mirrored into HA the same afternoon.** The owner put the binary on the Pi at
+16:10 (binary mtime 16:10:02, unit restarted 16:10:03; `directives.json` v83 — and it still has
+no `buy_vat_pct` key, so the live process is running on the 21.0 `serde` default, which is the
+migration path this section pins). The `cz_energy_spot_prices` entry's buy template was then
+changed from `value + distribution + fee` to:
+
+```jinja
+{{ value * (1 + (states('number.solar_bridge_planner_buy_vat_pct') | float(21)) / 100)
+        + (states('number.solar_bridge_planner_buy_distribution_czk') | float(2.515))
+        + (states('number.solar_bridge_planner_buy_seller_fee_czk') | float(0.3)) }}
+```
+
+The `float(21)` fallback is the bridge-down literal, as with the other two knobs; it also made
+the template correct before the new directive entity could be read. The sell template is
+unchanged. Verified on the 16:15 MTU: spot **11.7906** → bridge `price_buy` **17.082**, HA
+`sensor.current_buy_electricity_price_15min` **17.0816** (the bridge rounds to 3 dp, HA to 4);
+sell 11.491 vs 11.4906. And the whole published curve follows, not just *now*: 2026-11-11
+00:00 spot 5.4968 → 9.4661, 06:00 spot 4.538 → 8.306.
+
+Two things left standalone:
+
+- `buy_seller_fee_czk` stays 0.3 on the owner's reading that the ceník's 300 CZK/MWh is
+  VAT-inclusive. The supplier research digest quotes per-MWh fees *excl.* VAT, so if the
+  invoice taxes that fee too, the knob is 0.363 and no code changes.
+- Unrelated to VAT but read off the live file while checking: **`sell_fee_czk` is 0.3 on the
+  Pi**, not the 0.5 this record keeps calling "settled" — HA agrees, so both sides are
+  consistent, but the plan's arbitrage arithmetic above assumes 0.5 and is therefore
+  conservative by 0.2 CZK/kWh. Worth deciding whether 0.3 or 0.5 is the real fee.
