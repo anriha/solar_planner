@@ -21,6 +21,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use crate::ledger::LedgerRow;
 use crate::planner::{Action, CAPACITY_KWH, Plan, PlanStep};
 
 /// The longest window a `get_view` will answer, in seconds (60 civil days).
@@ -108,27 +109,21 @@ impl View {
     /// `from`/`to` are unix seconds and both optional: omitted, the window is the plan's own
     /// horizon. `now` is passed in so the caller decides what "now" means (server clock in
     /// production, a fixed instant in tests).
-    pub fn of_plan(plan: Option<&Plan>, from: Option<i64>, to: Option<i64>, now: i64) -> View {
-        let (from, to) = window(plan, from, to, now);
-        let Some(plan) = plan else {
-            return View {
-                computed_at: None,
-                now,
-                from,
-                to,
-                steps: Vec::new(),
-                days: Vec::new(),
-                adherence: Vec::new(),
-            };
-        };
-
+    pub fn of_plan(
+        plan: Option<&Plan>,
+        from: Option<i64>,
+        to: Option<i64>,
+        now: i64,
+        rows: &[LedgerRow],
+    ) -> View {
+        let (from, to) = window_for(plan, from, to, now);
         let zone = TimeZone::get("Europe/Prague").expect("the Prague zone is compiled in");
         let mut steps = Vec::new();
         let mut days: BTreeMap<String, DayTotals> = BTreeMap::new();
 
         for step in plan
-            .steps
-            .iter()
+            .into_iter()
+            .flat_map(|plan| plan.steps.iter())
             .filter(|step| step.mtu.start >= from && step.mtu.start < to)
         {
             let projected = project(step);
@@ -161,21 +156,65 @@ impl View {
             })
             .collect();
 
+        // The ledger's half: fold each closed MTU into the step it belongs to, so the chart
+        // can draw the meter against the plan, and keep a row for the windows that hold
+        // history the current plan no longer covers.
+        let window: Vec<&LedgerRow> = rows
+            .iter()
+            .filter(|row| row.start >= from && row.start < to)
+            .collect();
+        let mut by_start: BTreeMap<i64, &LedgerRow> =
+            window.iter().map(|row| (row.start, *row)).collect();
+        for step in &mut steps {
+            let Some(row) = by_start.remove(&step.start) else {
+                continue;
+            };
+            if step.hours > 0.0 {
+                step.ac_actual_kw = Some(round2(row.actual.ac_kwh / step.hours));
+            }
+            step.soc_actual_pct = row.actual.soc_end_pct.map(round1);
+        }
+
+        let mut adherence: Vec<AdherenceRow> = window
+            .iter()
+            .map(|row| {
+                let actual_kw = round2(row.actual.ac_kwh / row.hours);
+                let planned_kw = planned_kw(row);
+                AdherenceRow {
+                    start: row.start,
+                    planned_kw,
+                    actual_kw,
+                    delta_kw: round2(actual_kw - planned_kw),
+                }
+            })
+            .collect();
+        adherence.sort_by_key(|row| row.start);
+
         View {
-            computed_at: Some(plan.computed_at),
+            computed_at: plan.map(|plan| plan.computed_at),
             now,
             from,
             to,
             steps,
             days,
-            adherence: Vec::new(),
+            adherence,
         }
+    }
+}
+
+/// The metered power the plan expected for a closed MTU: the signed `ac_kwh` the DP priced,
+/// which is what the actual is compared against. A row from outside the current plan's
+/// horizon carries its own copy of the projection.
+fn planned_kw(row: &LedgerRow) -> f64 {
+    match &row.plan {
+        Some(plan) if row.hours > 0.0 => round2(plan.ac_kwh / row.hours),
+        _ => 0.0,
     }
 }
 
 /// The served window: the requested one (defaulting to the plan's horizon), clamped to
 /// [`MAX_WINDOW_SECS`].
-fn window(plan: Option<&Plan>, from: Option<i64>, to: Option<i64>, now: i64) -> (i64, i64) {
+pub fn window_for(plan: Option<&Plan>, from: Option<i64>, to: Option<i64>, now: i64) -> (i64, i64) {
     let plan_from = plan
         .and_then(|plan| plan.steps.first())
         .map(|step| step.mtu.start);

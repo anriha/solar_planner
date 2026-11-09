@@ -21,8 +21,12 @@
 #   options present -> raw is an enum index, decoded to the mapped string
 #   str: N words, 2 ASCII chars per word, high byte first, NULs trimmed
 #
-# Sign conventions to verify under real load (plan open items):
-#   grid_power_total 619: import = positive (per Developer089, unverified)
+# Sign conventions (measured 2026-11-09, plan open item closed):
+#   grid_internal_power_total 607 IS the AC export meter: import = positive, export =
+#     negative. On 2026-11-07, exporting 9.4-12.1 kW, it read -9 379 .. -12 109 W.
+#   grid_power_total 619 is NOT wired to the export on this install: 0-12 W for the whole
+#     of 2026-11-06..09 while the plant exported. Never use it as the meter - a ledger
+#     reading it would write plausible-looking zeros for every MTU.
 #   battery 590/591: sunsynk applies negative scale (native flip? unverified)
 #
 # TODO firmware version registers: probed 2026-09-27 - candidate block
@@ -88,8 +92,8 @@ sensors = [
   { name = "grid_power_l1", address = 616, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
   { name = "grid_power_l2", address = 617, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
   { name = "grid_power_l3", address = 618, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
-  { name = "grid_power_total", address = 619, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                  # import=positive per Developer089, VERIFY
-  { name = "grid_internal_power_total", address = 607, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },
+  { name = "grid_power_total", address = 619, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },                  # NOT the export meter here: 0-12 W during 12 kW exports (2026-11-07)
+  { name = "grid_internal_power_total", address = 607, encoding = { type = "s16" }, unit = "W", device_class = "power", state_class = "measurement" },  # THE AC meter: import +, export - (measured 2026-11-07)
 
   # ---------------------------------------------------- inverter output
   { name = "inverter_voltage_l1", address = 627, encoding = { type = "u16" }, scale = 0.1, unit = "V", device_class = "voltage", state_class = "measurement" },  # VERIFIED 227.7

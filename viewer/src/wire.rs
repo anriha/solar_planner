@@ -151,7 +151,8 @@ mod tests {
 
         assert_eq!(view.steps.len(), 7);
         assert_eq!(view.days.len(), 2);
-        assert!(view.adherence.is_empty());
+        assert_eq!(view.adherence.len(), 2);
+        assert_eq!(view.adherence[0].delta_kw, -0.78);
 
         // The bar is metered power; the command sits beside it as a marker.
         assert_eq!(view.steps[0].ac_kw, 7.94);

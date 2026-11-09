@@ -16,6 +16,7 @@ use kameo::actor::ActorRef;
 
 use crate::{
     bus::{BusActor, WriteRegister},
+    ledger::{LedgerActor, QueryRows},
     directives::{ApplyDirective, Directives, DirectivesActor, GetCurrent},
     protocol::{ClientMsg, ServerMsg},
     state::{GetState, StateActor, Subscribe, Unsubscribe, WatchPlan},
@@ -39,6 +40,7 @@ pub struct AppState {
     pub state: ActorRef<StateActor>,
     pub directives: ActorRef<DirectivesActor>,
     pub bus: ActorRef<BusActor>,
+    pub ledger: ActorRef<LedgerActor>,
     pub token: String,
 }
 
@@ -202,9 +204,12 @@ async fn connection(app: AppState, mut socket: WebSocket, peer: SocketAddr) {
                     },
                 }
             }
-            Ok(ClientMsg::GetView { id, from, to }) => {
-                view_reply(&app, conn_id, id, from, to).await
-            }
+            Ok(ClientMsg::GetView {
+                id,
+                from,
+                to,
+                history,
+            }) => view_reply(&app, conn_id, id, from, to, history).await,
             Err(e) => ServerMsg::Error {
                 message: format!("malformed message: {e}"),
             },
@@ -235,6 +240,7 @@ async fn view_reply(
     id: String,
     from: Option<i64>,
     to: Option<i64>,
+    history: Option<i64>,
 ) -> ServerMsg {
     if let (Some(from), Some(to)) = (from, to)
         && to <= from
@@ -250,9 +256,19 @@ async fn view_reply(
     };
     let _ = app.state.tell(WatchPlan(conn_id)).send().await;
     let now = jiff::Timestamp::now().as_second();
+    // `history` is the client saying "a week back plus your horizon" without having to know
+    // its own clock agrees with the bridge's. The window is resolved once, here, so the
+    // ledger read and the projection cannot disagree about what was asked for.
+    let from = from.or_else(|| history.map(|seconds| now - seconds.clamp(0, crate::view::MAX_WINDOW_SECS)));
+    let (from, to) = crate::view::window_for(payload.plan.as_ref(), from, to, now);
+    let rows = app
+        .ledger
+        .ask(QueryRows { from, to })
+        .await
+        .unwrap_or_default();
     ServerMsg::View {
         id,
-        view: View::of_plan(payload.plan.as_ref(), from, to, now),
+        view: View::of_plan(payload.plan.as_ref(), Some(from), Some(to), now, &rows),
     }
 }
 

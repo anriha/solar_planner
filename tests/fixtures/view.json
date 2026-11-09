@@ -1,5 +1,18 @@
 {
-  "adherence": [],
+  "adherence": [
+    {
+      "actual_kw": 7.16,
+      "delta_kw": -0.78,
+      "planned_kw": 7.94,
+      "start": 1793831400
+    },
+    {
+      "actual_kw": -9.24,
+      "delta_kw": -0.4,
+      "planned_kw": -8.84,
+      "start": 1793832300
+    }
+  ],
   "computed_at": 1793872680,
   "days": [
     {
@@ -23,7 +36,7 @@
   "now": 1793875320,
   "steps": [
     {
-      "ac_actual_kw": null,
+      "ac_actual_kw": 7.16,
       "ac_kw": 7.94,
       "command_kw": 8.4,
       "hours": 0.25,
@@ -34,12 +47,12 @@
       "pv_kw": 0.0,
       "reason": "sell 7.90 > stored 5.32 CZK/kWh",
       "reason_kind": "price_above_stored_value",
-      "soc_actual_pct": null,
+      "soc_actual_pct": 62.0,
       "soc_end_pct": 62.5,
       "start": 1793831400
     },
     {
-      "ac_actual_kw": null,
+      "ac_actual_kw": -9.24,
       "ac_kw": -8.84,
       "command_kw": -9.6,
       "hours": 0.25,
@@ -50,7 +63,7 @@
       "pv_kw": 0.0,
       "reason": "buy 3.24 < later 5.32 CZK/kWh",
       "reason_kind": "buy_below_future_value",
-      "soc_actual_pct": null,
+      "soc_actual_pct": 55.1,
       "soc_end_pct": 75.0,
       "start": 1793832300
     },

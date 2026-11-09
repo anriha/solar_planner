@@ -27,6 +27,10 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(90);
 const BACKOFF_MIN: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// Seven days of closed MTUs behind the plan's horizon. The bridge's clock resolves it, so a
+/// browser whose clock is wrong cannot misplace the window.
+const HISTORY_SECS: i64 = 7 * 24 * 60 * 60;
+
 /// Where the viewer connects and which token it presents.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -191,7 +195,9 @@ impl Link {
             Some((from, to)) => {
                 format!(r#"{{"type":"get_view","id":"v{id}","from":{from},"to":{to}}}"#)
             }
-            None => format!(r#"{{"type":"get_view","id":"v{id}"}}"#),
+            None => format!(
+                r#"{{"type":"get_view","id":"v{id}","history":{HISTORY_SECS}}}"#
+            ),
         };
         if self.send(&text) {
             self.awaiting = true;

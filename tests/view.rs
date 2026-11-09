@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use solar_controller::planner::{Action, Mtu, Plan, PlanStep, Reason};
 use solar_controller::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours};
+use solar_controller::ledger::{ActualMtu, LedgerRow, PlannedMtu};
 use solar_controller::view::{MAX_WINDOW_SECS, View};
 
 /// 2026-11-04T00:00 Prague (CET, UTC+1).
@@ -167,8 +168,25 @@ fn fixture_plan() -> Plan {
     }
 }
 
+/// Two closed MTUs with a meter that missed their plan by a little: an export that metered
+/// 0.2 kWh under, and an import that metered 0.1 kWh over.
+fn fixture_rows() -> Vec<LedgerRow> {
+    let plan = fixture_plan();
+    let row = |start: i64, actual_kwh: f64, soc: f64| LedgerRow {
+        start,
+        hours: 0.25,
+        plan: solar_controller::ledger::planned_for(Some(&plan), start),
+        actual: ActualMtu {
+            ac_kwh: actual_kwh,
+            soc_end_pct: Some(soc),
+            samples: 180,
+        },
+    };
+    vec![row(LATE, 1.79, 62.0), row(LATE + 900, -2.31, 55.1)]
+}
+
 fn fixture_view() -> View {
-    View::of_plan(Some(&fixture_plan()), None, None, NOW)
+    View::of_plan(Some(&fixture_plan()), None, None, NOW, &fixture_rows())
 }
 
 #[test]
@@ -212,6 +230,24 @@ fn bars_are_the_metered_power_and_the_command_is_a_marker() {
     assert_eq!(import.command_kw, -9.6);
 }
 
+/// The ledger's half of the contract: a closed MTU's meter lands on the step it belongs to,
+/// and the adherence row is the difference the strip colours.
+#[test]
+fn closed_mtus_carry_the_meter_into_the_view() {
+    let view = fixture_view();
+    assert_eq!(view.steps[0].ac_actual_kw, Some(7.16));
+    assert_eq!(view.steps[0].soc_actual_pct, Some(62.0));
+    assert_eq!(view.steps[1].ac_actual_kw, Some(-9.24));
+
+    assert_eq!(view.adherence.len(), 2);
+    assert_eq!(view.adherence[0].start, LATE);
+    assert_eq!(view.adherence[0].planned_kw, 7.94);
+    assert_eq!(view.adherence[0].actual_kw, 7.16);
+    assert_eq!(view.adherence[0].delta_kw, -0.78);
+    assert_eq!(view.adherence[1].planned_kw, -8.84);
+    assert_eq!(view.adherence[1].delta_kw, -0.4);
+}
+
 /// A hold that sells its surplus is a sale: `action` says idle, the meter says otherwise.
 #[test]
 fn an_idle_that_sells_has_a_positive_bar() {
@@ -253,7 +289,7 @@ fn day_totals_split_at_prague_midnight() {
 
 #[test]
 fn a_window_clips_the_steps_it_serves() {
-    let view = View::of_plan(Some(&fixture_plan()), Some(NOON), Some(NOON + 1800), NOW);
+    let view = View::of_plan(Some(&fixture_plan()), Some(NOON), Some(NOON + 1800), NOW, &[]);
     assert_eq!(view.from, NOON);
     assert_eq!(view.to, NOON + 1800);
     let starts: Vec<i64> = view.steps.iter().map(|step| step.start).collect();
@@ -265,7 +301,7 @@ fn a_window_clips_the_steps_it_serves() {
 #[test]
 fn a_window_longer_than_sixty_days_is_clamped() {
     let to = 2_000_000_000;
-    let view = View::of_plan(Some(&fixture_plan()), Some(0), Some(to), NOW);
+    let view = View::of_plan(Some(&fixture_plan()), Some(0), Some(to), NOW, &[]);
     assert_eq!(view.to, to);
     assert_eq!(view.from, to - MAX_WINDOW_SECS);
     assert!(
@@ -276,7 +312,7 @@ fn a_window_longer_than_sixty_days_is_clamped() {
 
 #[test]
 fn a_withdrawn_plan_projects_to_an_empty_view() {
-    let view = View::of_plan(None, None, None, NOW);
+    let view = View::of_plan(None, None, None, NOW, &[]);
     assert_eq!(view.computed_at, None);
     assert!(view.steps.is_empty());
     assert!(view.days.is_empty());

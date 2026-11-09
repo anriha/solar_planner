@@ -147,6 +147,11 @@ pub enum ClientMsg {
         from: Option<i64>,
         #[serde(default)]
         to: Option<i64>,
+        /// How far back from `now` to start when `from` is absent: `604800` is "the last
+        /// week, plus whatever horizon the plan has". The bridge's clock decides, so a
+        /// browser whose clock disagrees cannot place the window wrong.
+        #[serde(default)]
+        history: Option<i64>,
     },
     Ping,
 }

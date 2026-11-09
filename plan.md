@@ -1052,3 +1052,47 @@ horizon on every replan, silently, once a minute.
 - **Still open**: `/state`, `/meta` and `/directives` answer without the token (fifteenth session
   note); the ledger (`board-aru`) is what will make `get_view` answer anything older than the
   current horizon.
+
+### Phase 3a state (2026-11-09, nineteenth session) — the ledger, and the meter nobody had checked
+
+Three cuts: **board-3dx** (which register is the meter), **board-0os** (the day-file store) and
+**board-aru** (the per-MTU ledger), plus the view merge that makes the browser show it.
+
+- **The AC meter is register 607, not 619 — measured, not assumed.** `grid_power_total` (619) is
+  annotated "import positive, VERIFY" and is the name a reader would reach for. Against
+  2026-11-07, the clearest export day on record (9.4–12.1 kW out of the inverter), **607 read
+  −9 379 … −12 109 W while 619 read 0 … 12 W for the whole of 2026-11-06…09**. 619 is not wired
+  to the export on this install. A ledger integrating it would have written a plausible-looking
+  zero for every MTU — the failure mode board-3dx existed to prevent. Both registers now carry
+  the measurement in `maps/sun_3ph_hybrid.toml`, and `telemetry::MeteredSignals::ac_kw()` is the
+  single place the sign flips to the plan's export-positive convention. 619 cannot stand in: a
+  frame without 607 is an error, not a zero (`grid_power_total_cannot_stand_in_for_the_meter`).
+- **`StoreActor` owns every history file.** One `{YYYY-MM-DD}.jsonl` per Prague day under
+  `history_dir` (config, default `history`, i.e. `~/solar-bridge/history` in the unit). Rows
+  buffer in memory and flush on a 30-minute ticker, on day rotation, on a 64 KiB batch, and on
+  the graceful shutdown path — one `write_all` + one `sync_data` per flush, never per row. The
+  buffer is a durability policy, not an SD-wear fix: 96 rows/day ≈ 25 KB/day is nothing next to
+  the persistent journald. A crash can leave a torn last line; `read_range` drops it, so no
+  reader ever sees half a row. Retention deletes whole day files older than 60 days at startup
+  and on rotation. Reads go through the same actor, so `LedgerActor` holds no `Path`.
+- **`LedgerActor` subscribes to the state fan-out like any socket.** No change to the bus or the
+  planner: it receives `State` + `Plan` frames, extracts `MeteredSignals`, and integrates the
+  meter by trapezoid over the 5 s polls. At each MTU boundary it closes a row with the plan
+  **snapshot taken when the MTU opened** (`computed_at` stored beside it) and the measured
+  energy, and hands it to the store. `link_ok = false` frames are skipped — billing stale values
+  would invent energy. A restart mid-MTU drops that MTU's row on purpose: a half-integrated row
+  would look like a plant that missed its target. A sample that lands after the boundary closes
+  the MTU at the boundary, so the overshoot is never billed to the wrong quarter hour.
+- **`View::of_plan` now takes the rows.** For each step inside the window it fills
+  `ac_actual_kw` / `soc_actual_pct`; the window's closed MTUs become `adherence[]`
+  (`planned_kw`, `actual_kw`, `delta_kw`), with the plan side taken from the row itself when the
+  MTU is older than the current plan. `get_view` resolves the window once and passes it to both
+  the ledger read and the projection, so they cannot disagree. A new optional `history` seconds
+  field on `get_view` lets the browser ask for "a week back plus your horizon" without trusting
+  its own clock; the viewer sends 604 800.
+- **Verified**: `cargo test --all-targets` **219 passed / 0 failed / 3 ignored** (new:
+  `tests/ledger.rs` 3, `store` 4, `telemetry` 4, the view merge and the regenerated
+  `tests/fixtures/view.json` with two closed MTUs); `cargo test -p viewer` **13 passed**; clippy
+  clean under the flake devshell.
+- **Not deployed, and nothing to see yet**: the Pi still runs the pre-ledger binary, so the
+  viewer's adherence strip says "no ledger yet" until the first deploy closes an MTU.

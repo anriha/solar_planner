@@ -9,9 +9,11 @@ use kameo::actor::{ActorRef, Spawn};
 use serde_json::{Value as Json, json};
 use solar_controller::bus::{BusActor, LinkConfig};
 use solar_controller::directives::{Directives, DirectivesActor};
+use solar_controller::ledger;
 use solar_controller::map::{EMBEDDED_MAP, load_from_str};
 use solar_controller::server::{AppState, serve};
 use solar_controller::state::{StateActor, Update};
+use solar_controller::store::{StoreActor, StoreConfig};
 use solar_controller::telemetry::Snapshot;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -50,11 +52,16 @@ async fn setup_with(initial: Option<Json>) -> (u16, tempfile::TempDir, ActorRef<
         Duration::from_secs(5),
         state.clone(),
     ));
+    let store = StoreActor::spawn(StoreActor::new(
+        StoreConfig::new(dir.path().join("history")).unwrap(),
+    ));
+    let ledger = ledger::spawn(state.clone(), store).await.unwrap();
     let app = AppState {
         meta,
         state: state.clone(),
         directives,
         bus,
+        ledger,
         token: "test-token".into(),
     };
 
