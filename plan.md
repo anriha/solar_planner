@@ -1096,3 +1096,14 @@ Three cuts: **board-3dx** (which register is the meter), **board-0os** (the day-
   clean under the flake devshell.
 - **Not deployed, and nothing to see yet**: the Pi still runs the pre-ledger binary, so the
   viewer's adherence strip says "no ledger yet" until the first deploy closes an MTU.
+
+### Phase 3a state (2026-11-09, nineteenth session, second cut) — the calendar prints the meter
+
+board-vht, the last surface still showing the ladder rung: `plan_view.Segment.summary` said
+`Import 9.6 kW` while the same run's own `ac_kwh` priced 8.84 kW, reg 607 read 8.32 kW and the
+pack took 7.77 kW (2026-11-08 23:15). The summary now prints `ac_kwh / hours` — the metered
+power — and the description adds `commanded 9.6 kW` only when the command and the meter differ
+by more than 0.05 kW, so the gap is explained rather than hidden. Holds keep reading `Hold`;
+a hold that sells still reads its surplus in the description. Pinned by two new cases in
+`tests/test_plan_view.py` (an import 9.6 → 8.8 kW, an export 8.4 → 7.9 kW); the legacy-payload
+test still falls back to the command when `ac_kwh` is absent. `python3 -m unittest` 15 passed.

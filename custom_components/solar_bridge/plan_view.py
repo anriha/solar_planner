@@ -70,10 +70,21 @@ class Segment:
         return abs(self.net_czk) / traded if traded > 0 else None
 
     @property
+    def metered_kw(self) -> float:
+        """The power that actually crossed the meter, unsigned.
+
+        Not the ladder rung the DP picked: an import command of 9.6 kW metered 8.84 kW on
+        2026-11-08 because the pack cannot take what the ladder offers, and an export command
+        of 8.4 kW metered 7.94 kW because a conversion sits in the path. The summary is what
+        gets read at a glance, so it prints this.
+        """
+        return self.traded_kwh / self.hours if self.hours > 0 else 0.0
+
+    @property
     def summary(self) -> str:
         if self.kind == "idle":
             return "Hold"
-        return f"{ACTION_TEXT.get(self.kind, self.kind)} {self.kw:.1f} kW"
+        return f"{ACTION_TEXT.get(self.kind, self.kind)} {self.metered_kw:.1f} kW"
 
     @property
     def description(self) -> str:
@@ -86,6 +97,10 @@ class Segment:
             parts.append(f"{self.traded_kwh:.1f} kWh {direction}")
             if (price := self.price_czk_per_kwh) is not None:
                 parts.append(f"{price:.2f} CZK/kWh")
+        # The command is a secondary marker: it explains a gap between what was asked for
+        # and what the meter took, and is noise when they agree.
+        if self.kind != "idle" and abs(self.kw - self.metered_kw) > 0.05:
+            parts.append(f"commanded {self.kw:.1f} kW")
         parts.append(f"net {self.net_czk:+.2f} CZK")
         parts.append(f"pack {self.energy_after_kwh:.1f} kWh")
         parts.append("; ".join(_reason_text(r) for r in self.reasons))

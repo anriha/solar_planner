@@ -116,10 +116,27 @@ class WordingTest(unittest.TestCase):
         run = plan_view.segments(
             plan(step(T0, "import", 12.0, -13.59, 20.5, "buy_below_future_value", ac=-2.718))
         )[0]
-        self.assertEqual(run.summary, "Buy 12.0 kW")
+        # 2.718 kWh over the quarter hour is 10.9 kW — the command of 12.0 is not what ran.
+        self.assertEqual(run.summary, "Buy 10.9 kW")
         self.assertAlmostEqual(run.traded_kwh, 2.718)
         self.assertAlmostEqual(run.price_czk_per_kwh, 5.0, places=2)
         self.assertIn("2.7 kWh bought", run.description)
+
+    def test_the_summary_prints_the_meter_not_the_ladder_rung(self) -> None:
+        # 2026-11-08: an import commanded at 9.6 kW that metered 8.84, and an export
+        # commanded at 8.4 that metered 7.94. Both are single MTUs, so the run is the MTU.
+        bought = plan_view.segments(
+            plan(step(T0, "import", 9.6, -13.10, 20.5, "buy_below_future_value", ac=-2.21))
+        )[0]
+        self.assertEqual(bought.summary, "Buy 8.8 kW")
+        self.assertAlmostEqual(bought.metered_kw, 8.84, places=2)
+        self.assertIn("commanded 9.6 kW", bought.description)
+
+        sold = plan_view.segments(
+            plan(step(T0, "export", 8.4, 12.10, 21.4, "price_above_stored_value", ac=1.984))
+        )[0]
+        self.assertEqual(sold.summary, "Sell 7.9 kW")
+        self.assertIn("commanded 8.4 kW", sold.description)
 
     def test_a_payload_without_metered_ac_still_renders(self) -> None:
         # A bridge older than `ac_kwh`: the target is the only energy figure there is.
