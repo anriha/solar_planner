@@ -883,3 +883,51 @@ passed**, clippy clean through the flake devshell (no new findings).
 Still open: **not deployed**. After `just deploy` and an HA reload the two entities appear on
 "Solar Bridge planner"; set them to 6.1 to line the plan up with the 120 A registers, or leave
 them at 10.24 to keep pricing the pack's full 200 A.
+
+### Phase 3a fix 4 (2026-11-08, thirteenth session) — a hold charges the pack again
+
+Reported as "in selling first yesterday it still didn't charge battery first". The plant was
+right about the manual and the manual was right about the plant: both the English and the
+Chinese §5.7 say Selling First charges the battery before exporting, and the DP models a hold
+that way (`next_energy`, step 2), but the **plant does not do it in `selling_first`**.
+
+Measured 2026-11-07 (plan: one `Hold` 11:45 → 24:00, all six slots at target SOC 100 %, 0 W,
+charge off; `work_mode` `selling_first`, `solar_sell` on, `max_sell_power` 12 000):
+
+| 11-07 | pack | grid | PV | SOC |
+| --- | --- | --- | --- | --- |
+| 11:30 | −0.17 kW | −11.90 kW | 12.35 kW | 20 % |
+| 12:15 | −0.29 kW | −11.98 kW | 12.58 kW | 21 % |
+
+Day totals: PV 59.1 kWh, export 61.0 kWh, battery charged 7.3 kWh (all 18:00–21:00, from the
+grid), discharged 5.7 kWh. The pack sat at 21 % behind a 100 % target while every kWh of PV
+left. Across 11-07 00:00 → 11-08 17:00, charging > 1.5 kW happens only in `zero_export_load`
+(3 153 samples) and discharging > 1.5 kW only in `selling_first` (639) — **the work mode is
+the pack's direction valve**, and 2026-11-06's "holds run in `selling_first`" put the hold on
+the wrong side of it.
+
+- **`Desired` splits one flag into two**: `sell_from_pack` (`work_mode`: `selling_first` only
+  for a sell) and `sell_surplus` (`solar_sell`: on for a sell and a hold, off for an import).
+  A hold therefore runs `zero_export_load` with `solar_sell = 1` and `max_sell_power` at the
+  interface rating: PV charges the pack, the surplus sells. Write order follows the same flag —
+  the mode is written first when it is being disarmed, last when armed.
+- **The hold target is the ceiling, not 100 %** (`block()`): `solve` clamps the measured
+  energy into `[floor, ceiling]`, so a pack filled past 80 % is invisible to the planner and
+  its energy is never scheduled. The 0 W discharge cap keeps the pack out either way.
+- **Not changed, on purpose**: the Export branch still charges the pack first and reaches the
+  target through it (a ~6 % round-trip haircut on midday sell blocks), Import still curtails
+  its surplus, and there is still no curtail action for negative prices. Those are the next
+  three items, not this fix.
+- Tests: `a_hold_charges_to_the_ceiling_and_still_sells_the_surplus` (the regression that
+  would have caught 11-07), `a_sell_arms_the_mode_last`,
+  `a_hold_writes_the_discharge_cap_before_its_target_soc`, `a_buy_block_still_curtails_its_surplus`,
+  and the midnight/mid-day hold tests moved to the ceiling.
+
+`cargo test --all-targets` **188 passed / 0 failed / 3 ignored**, `python3 -m unittest` **14
+passed**, clippy unchanged (three pre-existing lints), `nix build .#solar-bridge-arm` exit 0.
+
+Still open: **not deployed**. On the first clear midday hold, watch that `battery_power` and
+`grid_internal_power_total` are both negative at once (charge *and* export), that `work_mode`
+reads `zero_export_load`, and that SOC stops at the ceiling. Second watch item: the device
+charges at `min(battery_charge_kw, reg 108)` — today reg 108 sat at 90 A for hours (4.6 kW), so
+a hold can fill slower than the DP prices until that register and the directive agree.

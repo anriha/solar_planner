@@ -22,15 +22,24 @@
 //! * 172–177 picks the charge source per slot; Import blocks use `grid`.
 //! * 143 caps export in watts; 145 enables PV export, 146 bit 0 is the TOU master.
 //!
-//! # Holding still sells the surplus (2026-11-06, supersedes mode A)
+//! # A hold sells the surplus but never sells from the pack (2026-11-08, supersedes
+//! 2026-11-06)
 //!
 //! A hold used to write `solar_sell = 0` and `max_sell_power = 0`, which curtailed every kWh
-//! of PV the pack could not absorb — a whole sunny afternoon of revenue, decided against by
-//! an "idle" that was only ever meant to keep the **pack** out of the trade. Now a hold runs
-//! the plant in `selling_first` with `solar_sell = 1` and `max_sell_power` at the interface
-//! rating, and the slot itself does the holding: target SOC 100 % and a 0 W discharge cap.
-//! Whether the pack really stays put is the one thing to watch on the first live write —
-//! `battery_power` must sit near 0 while a hold exports.
+//! of PV the pack could not absorb. The 2026-11-06 fix routed the hold through
+//! `selling_first` instead, which traded that defect for a worse one: **in `selling_first`
+//! the plant sells the PV and never charges the pack.** Measured 2026-11-07 with all six
+//! slots carrying target SOC 100 % and a 0 W discharge cap: the pack sat flat at 21 % while
+//! PV produced 12.35 kW and the meter took 11.90 kW. Across 11-07 00:00 → 11-08 17:00 every
+//! charge above 1.5 kW (3 153 samples) happened in `zero_export_load` and every discharge
+//! above 1.5 kW (639 samples) in `selling_first` — the mode is the pack's direction valve.
+//!
+//! So a hold runs in `zero_export_load` with `solar_sell = 1` and `max_sell_power` at the
+//! interface rating: PV charges the pack first and only the surplus leaves, which is what the
+//! DP models for an `Idle` MTU. `selling_first` is reserved for a sell — the only mode in
+//! which the pack may reach the meter. The slot target is the **ceiling**, not 100 %:
+//! `solve` clamps the measured energy into `[floor, ceiling]`, so a pack charged past the
+//! ceiling would be invisible to the planner.
 //!
 //! # The slot grid (2026-11-06, second fix)
 //!
@@ -47,9 +56,9 @@
 //!
 //! `selling_first` with a target SOC *above* the pack exported 9.5–9.8 kW from the battery
 //! at night, in three separate tests, stopping only at the next slot's target. Every hold
-//! block therefore pins its target SOC to 100 % **and** its discharge cap to 0 W, and the
-//! mode is disarmed before the slots are rewritten and armed again only afterwards, so the
-//! pack is never inside a slot rewrite with export live.
+//! block therefore pins its target SOC to the ceiling **and** its discharge cap to 0 W, and
+//! the mode is disarmed before the slots are rewritten and armed again only afterwards, so
+//! the pack is never inside a slot rewrite with export live.
 
 use std::collections::BTreeMap;
 
@@ -106,14 +115,13 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Desired {
     pub blocks: Vec<Block>,
-    /// The plant runs with PV export enabled (`selling_first`): true for a sell **and** for a
-    /// hold, because a hold still sells the surplus the pack cannot take.
-    pub exporting: bool,
-    /// Solar sell follows `exporting`. A hold used to keep it off, which is what made a hold
-    /// curtail the whole forecast surplus: the mode alone does not stop PV export when solar
-    /// sell is on (manual §5.7), but the reverse is just as true — with it off, nothing
-    /// leaves, whatever the slots say.
-    pub solar_sell: bool,
+    /// The pack may reach the meter (`work_mode = selling_first`): true only for a sell.
+    /// Measured 2026-11-07/08, the mode is the pack's direction valve — every discharge
+    /// above 1.5 kW happened in `selling_first` and no charge ever did.
+    pub sell_from_pack: bool,
+    /// PV export (`solar_sell`): true for a sell **and** for a hold, because a hold sells the
+    /// surplus the pack cannot take. Off for a grid-charge block, which curtails its surplus.
+    pub sell_surplus: bool,
     pub max_sell_w: u16,
     pub grid_charge: bool,
     pub charge_current_a: u16,
@@ -143,10 +151,12 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
     let segments = segments(&plan.steps, now, next_midnight(now, &zone));
 
     let current = segments.first().map(|s| s.kind).unwrap_or(Kind::Hold);
-    // A sell and a hold both run the plant with PV export enabled: a hold is a decision
-    // about the **pack** ("do not discharge, do not buy"), never an instruction to give the
-    // sun away. Only a grid-charge block, which runs in a no-export mode, curtails.
-    let exporting = matches!(current, Kind::Sell { .. } | Kind::Hold);
+    // A hold is a decision about the **pack** ("do not discharge, do not buy"), never an
+    // instruction to give the sun away — but it must not run `selling_first`, where the plant
+    // sells the PV and leaves the pack flat (2026-11-07). Only a sell arms the pack's export.
+    let sell_from_pack = matches!(current, Kind::Sell { .. });
+    // A hold still sells the surplus the pack cannot take; only a grid-charge block curtails.
+    let sell_surplus = matches!(current, Kind::Sell { .. } | Kind::Hold);
 
     // Slot 1 is the segment the clock is inside; the rest are the ones after it. A segment
     // that has not been written yet keeps waiting — the tail of a long plan is not dropped,
@@ -198,15 +208,15 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
             )
         }
         // A hold exports whatever the pack cannot take, so the export cap is the interface
-        // rating, not zero. Nothing leaves the pack: the slot's own power cap is 0 W and its
-        // target SOC is 100 %, so this number only lets PV through.
+        // rating, not zero. Nothing leaves the pack: the slot's own power cap is 0 W, so this
+        // number only lets the PV surplus through.
         Kind::Hold => (MAX_SELL_W as u16, 0, false, 0, 0.0),
     };
 
     Desired {
         blocks,
-        exporting,
-        solar_sell: exporting,
+        sell_from_pack,
+        sell_surplus,
         max_sell_w: max_sell_w.min(MAX_SELL_W as u16),
         grid_charge: matches!(current, Kind::Buy { .. }),
         charge_current_a,
@@ -283,12 +293,14 @@ fn block(start: String, kind: Kind, params: &ActuatorParams) -> Block {
             power_w: (kw * 1000.0).round().clamp(0.0, MAX_SELL_W) as u16,
             charge: Charge::Off,
         },
-        // Hold: a target above the pack blocks discharge (the grid carries standby in
-        // zero_export_load) and the charge source is Off, so the 100 target charges nothing
-        // from the grid — it only stops the pack from discharging.
+        // Hold: charge to the ceiling and stop there. The plant fills to the slot target, and
+        // the DP's energy grid ends at the ceiling (`solve` clamps the measured SOC into it),
+        // so a target of 100 would store energy the planner cannot see. The 0 W discharge cap
+        // is what keeps the pack out of the trade — including a pack already above the
+        // ceiling, which cannot bleed down through a 0 W slot.
         Kind::Hold => Block {
             start,
-            soc: 100,
+            soc: ceiling,
             power_w: 0,
             charge: Charge::Off,
         },
@@ -427,17 +439,17 @@ pub fn targets(desired: &Desired) -> Vec<Target> {
         write: serde_json::json!(desired.max_sell_w),
         expect: Value::Number(f64::from(desired.max_sell_w)),
     });
-    out.push(switch("solar_sell", desired.solar_sell));
-    let mode = if desired.exporting {
+    out.push(switch("solar_sell", desired.sell_surplus));
+    let mode = if desired.sell_from_pack {
         work_mode("selling_first", WORK_MODE_SELLING_FIRST)
     } else {
         work_mode("zero_export_load", WORK_MODE_ZERO_EXPORT_LOAD)
     };
-    if desired.exporting {
-        // Armed last: every slot and every cap is in place before selling starts.
+    if desired.sell_from_pack {
+        // Armed last: every slot and every cap is in place before the pack may export.
         out.push(mode);
     } else {
-        // Disarmed first: nothing can leave while the slots are rewritten.
+        // Disarmed first: nothing can leave the pack while the slots are rewritten.
         out.insert(0, mode);
     }
     out
@@ -649,21 +661,24 @@ mod tests {
         assert_eq!(desired.blocks[0].start, "00:00");
         assert_eq!(desired.blocks[0].soc, 20, "discharge is allowed only to the floor");
         assert_eq!(desired.blocks[0].power_w, 6000);
-        assert!(desired.exporting);
-        assert!(desired.solar_sell, "selling needs solar sell on");
+        assert!(desired.sell_from_pack, "a sell is the pack's export valve");
+        assert!(desired.sell_surplus, "selling needs solar sell on");
         assert_eq!(desired.max_sell_w, 6000);
     }
 
     #[test]
-    fn a_hold_block_pins_the_battery_but_still_sells_the_surplus() {
+    fn a_hold_charges_to_the_ceiling_and_still_sells_the_surplus() {
         let desired = desired(&plan(vec![Action::Idle]), T0, &params());
 
-        // The pack is held by the slot itself: target SOC 100 % and a 0 W discharge cap.
-        assert_eq!(desired.blocks[0].soc, 100, "a target above the pack holds it");
+        // The plant charges the pack to the slot target and sells only the surplus. The
+        // target is the DP's ceiling: `solve` clamps the measured SOC into [floor, ceiling],
+        // so a pack filled past 80 % would be invisible to the planner (2026-11-08).
+        assert_eq!(desired.blocks[0].soc, 80, "the hold target is the ceiling");
         assert_eq!(desired.blocks[0].power_w, 0, "nothing may leave the pack");
-        // The plant still exports, so nothing the pack cannot take is thrown away.
-        assert!(desired.exporting, "a hold sells its surplus");
-        assert!(desired.solar_sell, "export needs solar sell on");
+        // A hold must NOT run `selling_first`: there the plant sells the PV and never charges
+        // the pack (2026-11-07 — flat 21 % behind a 100 % target, 12 kW to the meter).
+        assert!(!desired.sell_from_pack, "a hold never exports from the pack");
+        assert!(desired.sell_surplus, "the surplus still leaves");
         assert_eq!(desired.max_sell_w, 12000, "the interface rating, not zero");
     }
 
@@ -673,15 +688,15 @@ mod tests {
         // there, and the actuator must not export it either.
         let desired = desired(&plan(vec![Action::Import { kw: AcKw::new(6.0) }]), T0, &params());
 
-        assert!(!desired.exporting);
-        assert!(!desired.solar_sell);
+        assert!(!desired.sell_from_pack);
+        assert!(!desired.sell_surplus);
         assert_eq!(desired.max_sell_w, 0);
     }
 
     #[test]
     fn a_hold_writes_the_discharge_cap_before_its_target_soc() {
         // With `selling_first` armed the pack once discharged 9.5–9.8 kW toward the previous
-        // slot's target, so the 0 W cap that stops it must land before the 100 % target.
+        // slot's target, so the 0 W cap that stops it must land before the target SOC.
         let targets = targets(&desired(&plan(vec![Action::Idle]), T0, &params()));
         let index = |name: &str| {
             targets
@@ -691,8 +706,25 @@ mod tests {
         };
 
         assert!(index("tou_power_1") < index("tou_soc_1"));
+        assert_eq!(
+            targets[0].name, "work_mode",
+            "the slots are rewritten with the pack's export disarmed"
+        );
+        assert_eq!(targets[0].expect, Value::Text("zero_export_load".into()));
+    }
+
+    #[test]
+    fn a_sell_arms_the_mode_last() {
+        // The other half of the ordering rule: `selling_first` lands only after every slot
+        // carries the sell's own target and cap.
+        let targets = targets(&desired(
+            &plan(vec![Action::Export { kw: AcKw::new(6.0) }]),
+            T0,
+            &params(),
+        ));
+
         let last = targets.last().expect("non-empty");
-        assert_eq!(last.name, "work_mode", "export is armed only at the end");
+        assert_eq!(last.name, "work_mode");
         assert_eq!(last.expect, Value::Text("selling_first".into()));
     }
 
@@ -943,7 +975,7 @@ mod tests {
         let desired = desired(&plan_at(start, actions), start + 5 * 60, &params());
 
         assert_eq!(desired.blocks[0].start, "23:45");
-        assert_eq!(desired.blocks[0].soc, 100);
+        assert_eq!(desired.blocks[0].soc, 80, "a hold targets the ceiling");
         assert!(
             desired
                 .blocks
@@ -956,12 +988,15 @@ mod tests {
             desired
                 .blocks
                 .iter()
-                .all(|block| block.soc == 100 && block.charge == Charge::Off),
+                .all(|block| block.soc == 80 && block.charge == Charge::Off),
             "tomorrow's buy leaked into today's slots: {:?}",
             desired.blocks
         );
         assert!(!desired.grid_charge);
-        assert!(desired.exporting, "the current block is a hold, which exports");
+        assert!(
+            !desired.sell_from_pack && desired.sell_surplus,
+            "the current block is a hold, which sells only its surplus"
+        );
     }
 
     #[test]
@@ -1005,8 +1040,11 @@ mod tests {
             desired.blocks[0].start, "00:30",
             "slot 1 is the segment the clock is inside, not midnight"
         );
-        assert_eq!(desired.blocks[0].soc, 100, "the current block is the hold");
-        assert!(desired.exporting, "a hold exports its surplus");
+        assert_eq!(desired.blocks[0].soc, 80, "the current block is the hold");
+        assert!(
+            !desired.sell_from_pack && desired.sell_surplus,
+            "a hold sells its surplus, never the pack"
+        );
     }
 
     fn steps_to_actions(steps: &[PlanStep]) -> Vec<Action> {
