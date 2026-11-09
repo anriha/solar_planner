@@ -11,7 +11,7 @@ use solar_controller::{
     protocol::ServerMsg,
     state::{StateActor, Subscribe, Update},
     telemetry::Snapshot,
-    units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKwh, Hours},
+    units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours},
 };
 use tokio::{sync::mpsc, time::timeout};
 
@@ -32,6 +32,9 @@ fn plan() -> Plan {
                 start: 1_793_746_800,
                 hours: Hours::new(0.25),
             },
+            price_sell: CzkPerKwh::new(5.3),
+            price_buy: CzkPerKwh::new(3.4),
+            pv_kw: DcKw::new(8.0),
             action: Action::Export {
                 kw: AcKw::new(6.0),
             },

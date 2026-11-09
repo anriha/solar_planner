@@ -442,6 +442,14 @@ pub enum Reason {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanStep {
     pub mtu: Mtu,
+    /// Net price received per kWh exported this MTU (spot − sell fee). Carried so a plan
+    /// frame can be charted without joining it against a second copy of the horizon.
+    pub price_sell: CzkPerKwh,
+    /// Price paid per kWh imported this MTU (spot + distribution + seller charges, VAT
+    /// included) — the same number [`Slot::price_buy`] gave the DP.
+    pub price_buy: CzkPerKwh,
+    /// Forecast PV on the DC side during this MTU, before any conversion curve.
+    pub pv_kw: DcKw,
     pub action: Action,
     /// Energy that left the pack this MTU (kWh), derived as `E − E'` whenever the pack
     /// discharged and 0 otherwise.
@@ -816,6 +824,9 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
 
         steps.push(PlanStep {
             mtu: slot.mtu,
+            price_sell: slot.price_sell,
+            price_buy: slot.price_buy,
+            pv_kw: slot.pv_kw,
             action,
             battery_out_kwh: (energy - after).max(DcKwh::ZERO),
             ac_kwh: flow.ac_out_kwh - flow.ac_in_kwh,

@@ -589,7 +589,7 @@ pub fn slot_of(name: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::planner::{Mtu, PlanStep, Reason};
-    use crate::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKwh, Hours};
+    use crate::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours};
 
     /// 2026-11-04T00:00 Prague.
     const T0: i64 = 1_793_746_800;
@@ -600,6 +600,9 @@ mod tests {
                 start: T0 + index * 900,
                 hours: Hours::new(0.25),
             },
+            price_sell: CzkPerKwh::new(5.0),
+            price_buy: CzkPerKwh::new(3.0),
+            pv_kw: DcKw::ZERO,
             action,
             battery_out_kwh: DcKwh::ZERO,
             ac_kwh: AcKwh::ZERO,
