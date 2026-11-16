@@ -436,13 +436,6 @@ pub struct Params {
     pub energy_step_kwh: DcKwh,
     /// Power-grid resolution in kW.
     pub action_step_kw: AcKw,
-    /// Shadow price of a curtailed kWh, CZK/kWh. The DP subtracts this times the PV the
-    /// plant refused (above the AC rating, or in a no-export block) from each MTU's money,
-    /// so wasting surplus costs what storing it would have earned. With this at zero the
-    /// optimizer is blind to curtailment and never pre-discharges to open headroom for a
-    /// peak; above zero it discharges ahead of a predicted peak to absorb the above-cap PV.
-    /// Policy (`Directives::curtailment_price_czk_per_kwh`), not a device fact.
-    pub curtailment_price: CzkPerKwh,
     pub terminal: TerminalValue,
 }
 
@@ -656,9 +649,17 @@ fn salvage_energy(level: DcKwh, params: &Params) -> AcKwh {
 /// Revenue minus cost of one MTU: money is a function of the metered AC only, less the
 /// shadow price of any PV the plant curtailed. The curtailment term is what makes the DP
 /// open headroom ahead of a peak instead of letting the above-cap surplus waste.
-fn money(slot: &Slot, flow: &Flow, params: &Params) -> Czk {
+///
+/// `curtailment_price` is the opportunity cost of a refused kWh, taken per MTU as
+/// [`best_later_price`]: the best net sell price still ahead in the horizon, floored at the
+/// live terminal value. It is the same market-derived quantity the [`Reason::HoldForLater`]
+/// explanation compares against, so it moves with the published price curve like every other
+/// price in the objective — not a static knob. A kWh the plant refuses is a kWh it cannot
+/// store and sell at that best upcoming price. The per-energy marginal value is deliberately
+/// *not* used: it reads zero at the ceiling, exactly where the shadow price must still bite.
+fn money(slot: &Slot, flow: &Flow, curtailment_price: CzkPerKwh) -> Czk {
     slot.price_sell * flow.ac_out_kwh - slot.price_buy * flow.ac_in_kwh
-        - params.curtailment_price * flow.curtailed_kwh
+        - curtailment_price * flow.curtailed_kwh
 }
 
 /// Every action the planner may command, `Idle` first so ties resolve toward doing nothing.
@@ -711,9 +712,6 @@ fn validate_params(params: &Params) -> Result<(), PlanError> {
     if params.soc_floor >= params.soc_ceiling {
         return Err(invalid("soc_floor must be below soc_ceiling"));
     }
-    if params.curtailment_price < CzkPerKwh::ZERO {
-        return Err(invalid("curtailment_price must be non-negative"));
-    }
     Ok(())
 }
 
@@ -735,8 +733,10 @@ fn validate_params(params: &Params) -> Result<(), PlanError> {
 ///   reaches the meter through `battery_to_grid`;
 /// * `next_energy(E, slot, action, params)` — the physics of one MTU: the next state and the
 ///   metered AC. The first MTU is planned for the part that is still ahead of `now`;
-/// * `money(slot, flow, params)` — revenue minus cost of one MTU, priced on the metered AC
-///   only, less the shadow price of curtailed PV;
+/// * `money(slot, flow, curtailment_price)` — revenue minus cost of one MTU, priced
+///   on the metered AC only, less the shadow price of curtailed PV. The shadow price is
+///   [`best_later_price`] per MTU (best net sell price ahead, floored at the terminal), not a
+///   knob, so it tracks the published price curve like every other price in the objective;
 /// * `action_set(params)` — every action the planner may command, `Idle` first so ties
 ///   resolve toward doing nothing.
 ///
@@ -798,6 +798,11 @@ pub fn build_value_table(problem: &Problem) -> Result<ValueTable, PlanError> {
     for index in (0..horizon).rev() {
         let slot = &problem.slots[index];
         let hours = step_hours(problem, index);
+        // The shadow price of refused PV is the best sell price still ahead, floored at the
+        // terminal value (and at zero: wasting energy is never a gain). Constant across the
+        // energy/action loops below — it depends only on the prices left in the horizon.
+        let curtailment_price =
+            best_later_price(&problem.slots[index + 1..], params).max(CzkPerKwh::ZERO);
         let mut row = Vec::with_capacity(levels.len());
 
         for &energy in &levels {
@@ -813,7 +818,8 @@ pub fn build_value_table(problem: &Problem) -> Result<ValueTable, PlanError> {
                 }
 
                 let after = flow.energy_after_kwh.clamp(lowest, highest);
-                let value = money(slot, &flow, params) + value_at(&rows[index + 1], &levels, after);
+                let value = money(slot, &flow, curtailment_price)
+                    + value_at(&rows[index + 1], &levels, after);
 
                 best = Some(match best {
                     Some(current) if current >= value => current,
@@ -888,6 +894,9 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
 
     for (index, slot) in problem.slots.iter().enumerate() {
         let hours = step_hours(problem, index);
+        // Same per-MTU shadow price the backward pass used, so the walk and the table agree.
+        let curtailment_price =
+            best_later_price(&problem.slots[index + 1..], params).max(CzkPerKwh::ZERO);
         let mut best: Option<(Czk, Action, Flow, DcKwh)> = None;
 
         for &action in &actions {
@@ -898,7 +907,7 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
             }
 
             let after = flow.energy_after_kwh.clamp(lowest, highest);
-            let value = money(slot, &flow, params) + table.at(index + 1, after);
+            let value = money(slot, &flow, curtailment_price) + table.at(index + 1, after);
 
             let better = match best {
                 Some((current, ..)) => value > current,
@@ -917,7 +926,7 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
             });
         };
 
-        let earned = money(slot, &flow, params);
+        let earned = money(slot, &flow, curtailment_price);
         let marginal = table.marginal(index, energy);
 
         steps.push(PlanStep {
@@ -1035,8 +1044,9 @@ pub struct Flow {
     pub ac_in_kwh: AcKwh,
     /// PV the plant refused this MTU: the surplus above the AC interface rating after the
     /// pack took its share (Idle/Export), or the whole refused spill in a no-export block
-    /// (Import). Not metered, not stored — priced at `Params::curtailment_price` so the DP
-    /// feels the waste. Zero when everything the array made was stored or sold.
+    /// (Import). Not metered, not stored — priced at the best later sell price (see
+    /// [`money`]) so the DP feels the waste. Zero when everything the array made was stored
+    /// or sold.
     pub curtailed_kwh: AcKwh,
 }
 
@@ -1230,9 +1240,6 @@ mod tests {
             soc_ceiling: 0.80,
             energy_step_kwh: DcKwh::new(0.32),
             action_step_kw: AcKw::new(1.2),
-            // Zero keeps the legacy tests' economics unchanged; the curtailment-aware
-            // behaviour has its own tests below that set a positive price.
-            curtailment_price: CzkPerKwh::ZERO,
             terminal: TerminalValue {
                 czk_per_kwh: CzkPerKwh::new(7.974),
             },
@@ -1983,19 +1990,82 @@ mod tests {
     }
 
     #[test]
-    fn curtailment_price_charges_the_refused_pv() {
+    fn curtailment_shadow_price_charges_the_refused_pv() {
         let slot = saturating_slot();
         let flow = next_energy(DcKwh::new(25.6), &slot, Action::Idle, &params());
-        let mut priced = params();
-        priced.curtailment_price = CzkPerKwh::new(8.0);
-        let free = money(&slot, &flow, &params());
-        let charged = money(&slot, &flow, &priced);
+        let free = money(&slot, &flow, CzkPerKwh::ZERO);
+        let charged = money(&slot, &flow, CzkPerKwh::new(8.0));
         let penalty = free - charged;
         assert!(
             (penalty.get() - 8.0 * flow.curtailed_kwh.get()).abs() < 1e-6,
             "the penalty is price × curtailed, got {penalty}"
         );
         assert!(penalty.get() > 20.0, "wasting ~3.9 kWh costs real money, got {penalty}");
+    }
+
+    #[test]
+    fn the_curtailment_shadow_price_tracks_the_later_peak_in_the_objective() {
+        // A full pack at a saturating MTU refuses ~3.9 kWh. No within-MTU action can reduce
+        // that (discharging during saturation only steals export capacity from PV), so the
+        // plan holds — but the objective still feels the refusal at the best later sell price.
+        // Raising the later peak must raise the penalty, exactly price × curtailed.
+        let p = params();
+        let full = p.capacity_kwh * p.soc_ceiling;
+        let saturating = saturating_slot();
+        let peak = |sell: f64| Slot {
+            mtu: Mtu {
+                start: T0 + HOUR,
+                hours: Hours::new(1.0),
+            },
+            price_sell: CzkPerKwh::new(sell),
+            price_buy: CzkPerKwh::new(5.0),
+            pv_kw: DcKw::new(0.0),
+            load_kw: AcKw::new(0.117),
+        };
+        let net0 = |sell1: f64, expected_price: f64| {
+            let plan = solve(&Problem {
+                slots: vec![saturating.clone(), peak(sell1)],
+                initial_energy_kwh: full,
+                now: T0,
+                params: p.clone(),
+            })
+            .expect("solve");
+            let step = &plan.steps[0];
+            let flow = next_energy(full, &saturating, step.action, &p);
+            // net = price_sell·ac_out − price_buy·ac_in − shadow·curtailed; both prices are 5.
+            let expected = 5.0 * step.ac_kwh.get() - expected_price * flow.curtailed_kwh.get();
+            assert!(
+                (step.net_czk.get() - expected).abs() < 1e-6,
+                "net {} != 5·ac − {expected_price}·curtailed = {expected}",
+                step.net_czk
+            );
+            step.net_czk
+        };
+        let low = net0(6.0, 7.974); // later peak below the terminal: shadow floors at terminal
+        let high = net0(15.0, 15.0); // later peak above it: shadow rides the peak
+        assert!(
+            high < low,
+            "a higher later peak must raise the curtailment penalty: {high} vs {low}"
+        );
+    }
+
+    #[test]
+    fn curtailment_price_floors_at_the_terminal_when_no_higher_sell_is_ahead() {
+        let slots = hourly(&[3.0, 4.0], 0.0, 0.0); // every sell below the 7.974 terminal
+        let p = params();
+        assert_eq!(best_later_price(&slots[1..], &p), p.terminal.czk_per_kwh);
+        assert_eq!(best_later_price(&slots[2..], &p), p.terminal.czk_per_kwh);
+    }
+
+    #[test]
+    fn curtailment_price_tracks_a_higher_sell_ahead() {
+        let slots = hourly(&[3.0, 12.0], 0.0, 0.0);
+        let p = params();
+        // A 12.0 peak ahead beats the terminal: a refused kWh is priced at that peak, so the
+        // shadow price rises and falls with the published curve rather than sitting at a knob.
+        assert_eq!(best_later_price(&slots[1..], &p), CzkPerKwh::new(12.0));
+        // Past the peak, only the terminal remains.
+        assert_eq!(best_later_price(&slots[2..], &p), p.terminal.czk_per_kwh);
     }
 
     #[test]

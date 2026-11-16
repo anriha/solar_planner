@@ -305,28 +305,15 @@ pub struct Directives {
     pub energy_step_kwh: f64,
     /// Action-grid resolution the DP chooses from, kW.
     pub action_step_kw: f64,
-    /// Shadow price of a curtailed kWh, CZK/kWh, fed to `Params::curtailment_price`. The DP
-    /// charges this for PV the plant refuses (above the 12 kW AC rating, or in a no-export
-    /// block), so it opens headroom ahead of a predicted peak instead of wasting the
-    /// above-cap surplus. Defaults to the terminal bootstrap: a wasted kWh is worth what a
-    /// stored kWh earns at the horizon end. `serde(default)` keeps an older file loading.
-    #[serde(default = "default_curtailment_price")]
-    pub curtailment_price_czk_per_kwh: Price,
     /// Standing headroom to hold under the ceiling through the solar window, kWh. The
-    /// governor discharges toward `soc_ceiling − reserve` in the reserve window so a peak
-    /// the forecast missed still finds room to absorb its above-cap PV. 0 disables it (the
-    /// November default: saturation is occasional, the curtailment price handles predicted
-    /// peaks). Deepen it in summer when every day saturates. `serde(default)` for old files.
+    /// governor discharges toward `soc_ceiling − reserve` so a peak the forecast missed still
+    /// finds room to absorb its above-cap PV. The window is not a knob: it is derived from the
+    /// PV forecast's timing for the current day (see `governor::reserve_window`). 0 disables
+    /// the reserve (the November default: saturation is occasional, and the DP's dynamic
+    /// curtailment shadow price handles predicted peaks). Deepen it in summer when every day
+    /// saturates. `serde(default)` for old files.
     #[serde(default)]
     pub reserve_headroom_kwh: f64,
-    /// Local hour the reserve window opens (inclusive). Climatology, not weather: the hours
-    /// the array is capable of exceeding the export cap. Ignored when reserve_headroom_kwh
-    /// is 0.
-    #[serde(default = "default_reserve_start_hour")]
-    pub reserve_start_hour: f64,
-    /// Local hour the reserve window closes (exclusive).
-    #[serde(default = "default_reserve_end_hour")]
-    pub reserve_end_hour: f64,
     /// The four conversion paths the DP prices. Each is a list of editable
     /// `(power, efficiency)` points; see [`PathCurve`]. `serde(default)` carries the
     /// measured curves into a `directives.json` written before they were configurable.
@@ -362,20 +349,6 @@ fn default_battery_charge_kw() -> f64 {
     BATTERY_MAX_KW
 }
 
-/// A curtailed kWh is worth what a stored kWh earns at the horizon end, so the default
-/// shadow price mirrors the terminal bootstrap. Tunable from HA once measured.
-fn default_curtailment_price() -> Price {
-    Price::try_from(crate::planner::BOOTSTRAP_TERMINAL_CZK_PER_KWH).expect("static bound")
-}
-
-fn default_reserve_start_hour() -> f64 {
-    8.0
-}
-
-fn default_reserve_end_hour() -> f64 {
-    16.0
-}
-
 impl Default for Directives {
     fn default() -> Self {
         let percent = |value: f64| Percent::try_from(value).expect("static bound");
@@ -397,10 +370,7 @@ impl Default for Directives {
             forecast_calibration: 1.0,
             energy_step_kwh: 0.32,
             action_step_kw: 1.2,
-            curtailment_price_czk_per_kwh: default_curtailment_price(),
             reserve_headroom_kwh: 0.0,
-            reserve_start_hour: default_reserve_start_hour(),
-            reserve_end_hour: default_reserve_end_hour(),
             pv_to_battery: default_pv_to_battery(),
             pv_to_grid: default_pv_to_grid(),
             battery_to_grid: default_battery_to_grid(),
@@ -582,24 +552,9 @@ impl Directives {
                 &mut self.action_step_kw,
                 number_in(&value, name, 0.1..=5.0)?,
             ),
-            "curtailment_price_czk_per_kwh" => {
-                let new = price(&value, name)?;
-                if new.get() < 0.0 {
-                    return Err(invalid(name, "expected a non-negative shadow price"));
-                }
-                set(&mut self.curtailment_price_czk_per_kwh, new)
-            }
             "reserve_headroom_kwh" => set(
                 &mut self.reserve_headroom_kwh,
                 number_in(&value, name, 0.0..=crate::planner::CAPACITY_KWH)?,
-            ),
-            "reserve_start_hour" => set(
-                &mut self.reserve_start_hour,
-                number_in(&value, name, 0.0..=24.0)?,
-            ),
-            "reserve_end_hour" => set(
-                &mut self.reserve_end_hour,
-                number_in(&value, name, 0.0..=24.0)?,
             ),
             _ => return Err(ApplyError::Unknown(name.to_string())),
         };
@@ -698,12 +653,21 @@ pub fn load(path: &Path) -> anyhow::Result<Option<Directives>> {
             let mut value: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| anyhow::anyhow!("directives file {path:?}: {e}"))?;
             // `force_mode` was deleted 2026-11-06, and `buy_price_czk` retired the same day
-            // with the spot-buy model (buy is spot + the two charges now). A file written by
-            // an older binary still carries them, and `deny_unknown_fields` would turn that
-            // into a startup failure; drop the retired keys instead. Every other unknown
-            // field is still an error.
+            // with the spot-buy model (buy is spot + the two charges now). The curtailment
+            // shadow price became dynamic (best later sell price, floored at the terminal)
+            // and the reserve window became forecast-derived, so `curtailment_price_czk_per_kwh`,
+            // `reserve_start_hour` and `reserve_end_hour` were retired 2026-11-16. A file
+            // written by an older binary still carries them, and `deny_unknown_fields` would
+            // turn that into a startup failure; drop the retired keys instead. Every other
+            // unknown field is still an error.
             if let Some(object) = value.as_object_mut() {
-                for retired in ["force_mode", "buy_price_czk"] {
+                for retired in [
+                    "force_mode",
+                    "buy_price_czk",
+                    "curtailment_price_czk_per_kwh",
+                    "reserve_start_hour",
+                    "reserve_end_hour",
+                ] {
                     object.remove(retired);
                 }
             }
@@ -1055,15 +1019,6 @@ pub fn directive_schema() -> serde_json::Value {
             label: None,
         },
         DirectiveSpec::Number {
-            name: "curtailment_price_czk_per_kwh",
-            min: 0.0,
-            max: 10_000.0,
-            nullable: false,
-            unit: Some("CZK/kWh"),
-            step: Some(0.1),
-            label: Some("Curtailment shadow price"),
-        },
-        DirectiveSpec::Number {
             name: "reserve_headroom_kwh",
             min: 0.0,
             max: crate::planner::CAPACITY_KWH,
@@ -1071,24 +1026,6 @@ pub fn directive_schema() -> serde_json::Value {
             unit: Some("kWh"),
             step: Some(0.5),
             label: Some("Solar-window headroom reserve"),
-        },
-        DirectiveSpec::Number {
-            name: "reserve_start_hour",
-            min: 0.0,
-            max: 24.0,
-            nullable: false,
-            unit: Some("h"),
-            step: Some(0.5),
-            label: Some("Reserve window start"),
-        },
-        DirectiveSpec::Number {
-            name: "reserve_end_hour",
-            min: 0.0,
-            max: 24.0,
-            nullable: false,
-            unit: Some("h"),
-            step: Some(0.5),
-            label: Some("Reserve window end"),
         },
     ];
     specs.extend(curve_specs());

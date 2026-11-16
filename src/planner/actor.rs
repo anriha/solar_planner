@@ -96,7 +96,6 @@ pub fn device_params(directives: &Directives, terminal: TerminalValue) -> Params
         soc_ceiling: directives.soc_ceiling.get() / 100.0,
         energy_step_kwh: DcKwh::new(directives.energy_step_kwh),
         action_step_kw: AcKw::new(directives.action_step_kw),
-        curtailment_price: CzkPerKwh::new(directives.curtailment_price_czk_per_kwh.get()),
         terminal,
     }
 }
@@ -130,17 +129,20 @@ pub fn actuator_params(directives: &Directives) -> ActuatorParams {
 }
 
 /// The governor's slice of policy: the band it enforces on the measured SOC and the
-/// climatological headroom reserve. Device facts (capacity) are constants; the rest is
-/// directives, retunable from HA without a rebuild.
-pub fn governor_params(directives: &Directives) -> GovernorParams {
+/// forecast-timed headroom reserve. Device facts (capacity) are constants; the depth is a
+/// directive retunable from HA; the window is derived from the plan's forecast PV timing
+/// ([`governor::reserve_window`]), not a knob.
+pub fn governor_params(
+    directives: &Directives,
+    reserve_window: Option<(i64, i64)>,
+) -> GovernorParams {
     GovernorParams {
         soc_floor_pct: directives.soc_floor.get(),
         soc_ceiling_pct: directives.soc_ceiling.get(),
         capacity_kwh: CAPACITY_KWH,
         battery_discharge_kw: directives.battery_discharge_kw,
         reserve_headroom_kwh: directives.reserve_headroom_kwh,
-        reserve_start_hour: directives.reserve_start_hour,
-        reserve_end_hour: directives.reserve_end_hour,
+        reserve_window,
     }
 }
 
@@ -291,7 +293,15 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
             plan.steps.first().map(|step| step.action),
             Some(Action::Export { kw }) if kw.get() > 0.0
         );
-        let desired = match governor::decide(soc_pct, plan_selling, now, &governor_params(directives)) {
+        // The reserve window is the forecast's solar day for `now`, read from the plan's PV
+        // timing; the spill itself stays measured-state and forecast-agnostic.
+        let reserve_window = governor::reserve_window(&plan.steps, now);
+        let desired = match governor::decide(
+            soc_pct,
+            plan_selling,
+            now,
+            &governor_params(directives, reserve_window),
+        ) {
             governor::Govern::Spill => {
                 eprintln!("[governor] SOC {soc_pct:.1}% at ceiling; spill (hold + export surplus)");
                 actuator::spill_desired(now, &params)
