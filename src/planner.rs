@@ -44,6 +44,7 @@ use crate::units::{AcKw, AcKwh, Czk, CzkPerKwh, DcKw, DcKwh, Hours, Quantity};
 pub mod actor;
 pub mod actuator;
 pub mod forecast;
+pub mod governor;
 pub mod horizon;
 pub mod price;
 
@@ -435,6 +436,13 @@ pub struct Params {
     pub energy_step_kwh: DcKwh,
     /// Power-grid resolution in kW.
     pub action_step_kw: AcKw,
+    /// Shadow price of a curtailed kWh, CZK/kWh. The DP subtracts this times the PV the
+    /// plant refused (above the AC rating, or in a no-export block) from each MTU's money,
+    /// so wasting surplus costs what storing it would have earned. With this at zero the
+    /// optimizer is blind to curtailment and never pre-discharges to open headroom for a
+    /// peak; above zero it discharges ahead of a predicted peak to absorb the above-cap PV.
+    /// Policy (`Directives::curtailment_price_czk_per_kwh`), not a device fact.
+    pub curtailment_price: CzkPerKwh,
     pub terminal: TerminalValue,
 }
 
@@ -645,9 +653,12 @@ fn salvage_energy(level: DcKwh, params: &Params) -> AcKwh {
     AcKwh::new(level.get() * params.battery_to_grid.at(params.battery_discharge_max_kw))
 }
 
-/// Revenue minus cost of one MTU: money is a function of the metered AC only.
-fn money(slot: &Slot, flow: &Flow) -> Czk {
+/// Revenue minus cost of one MTU: money is a function of the metered AC only, less the
+/// shadow price of any PV the plant curtailed. The curtailment term is what makes the DP
+/// open headroom ahead of a peak instead of letting the above-cap surplus waste.
+fn money(slot: &Slot, flow: &Flow, params: &Params) -> Czk {
     slot.price_sell * flow.ac_out_kwh - slot.price_buy * flow.ac_in_kwh
+        - params.curtailment_price * flow.curtailed_kwh
 }
 
 /// Every action the planner may command, `Idle` first so ties resolve toward doing nothing.
@@ -700,6 +711,9 @@ fn validate_params(params: &Params) -> Result<(), PlanError> {
     if params.soc_floor >= params.soc_ceiling {
         return Err(invalid("soc_floor must be below soc_ceiling"));
     }
+    if params.curtailment_price < CzkPerKwh::ZERO {
+        return Err(invalid("curtailment_price must be non-negative"));
+    }
     Ok(())
 }
 
@@ -721,7 +735,8 @@ fn validate_params(params: &Params) -> Result<(), PlanError> {
 ///   reaches the meter through `battery_to_grid`;
 /// * `next_energy(E, slot, action, params)` — the physics of one MTU: the next state and the
 ///   metered AC. The first MTU is planned for the part that is still ahead of `now`;
-/// * `money(slot, flow)` — revenue minus cost of one MTU, priced on the metered AC only;
+/// * `money(slot, flow, params)` — revenue minus cost of one MTU, priced on the metered AC
+///   only, less the shadow price of curtailed PV;
 /// * `action_set(params)` — every action the planner may command, `Idle` first so ties
 ///   resolve toward doing nothing.
 ///
@@ -798,7 +813,7 @@ pub fn build_value_table(problem: &Problem) -> Result<ValueTable, PlanError> {
                 }
 
                 let after = flow.energy_after_kwh.clamp(lowest, highest);
-                let value = money(slot, &flow) + value_at(&rows[index + 1], &levels, after);
+                let value = money(slot, &flow, params) + value_at(&rows[index + 1], &levels, after);
 
                 best = Some(match best {
                     Some(current) if current >= value => current,
@@ -883,7 +898,7 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
             }
 
             let after = flow.energy_after_kwh.clamp(lowest, highest);
-            let value = money(slot, &flow) + table.at(index + 1, after);
+            let value = money(slot, &flow, params) + table.at(index + 1, after);
 
             let better = match best {
                 Some((current, ..)) => value > current,
@@ -902,7 +917,7 @@ pub fn solve(problem: &Problem) -> Result<Plan, PlanError> {
             });
         };
 
-        let earned = money(slot, &flow);
+        let earned = money(slot, &flow, params);
         let marginal = table.marginal(index, energy);
 
         steps.push(PlanStep {
@@ -1018,6 +1033,11 @@ pub struct Flow {
     pub ac_out_kwh: AcKwh,
     /// AC drawn from the grid this MTU, billed at the slot's `price_buy`.
     pub ac_in_kwh: AcKwh,
+    /// PV the plant refused this MTU: the surplus above the AC interface rating after the
+    /// pack took its share (Idle/Export), or the whole refused spill in a no-export block
+    /// (Import). Not metered, not stored — priced at `Params::curtailment_price` so the DP
+    /// feels the waste. Zero when everything the array made was stored or sold.
+    pub curtailed_kwh: AcKwh,
 }
 
 /// One MTU of plant physics: `(E, slot, action, params) → Flow`.
@@ -1147,12 +1167,30 @@ pub fn next_energy_hours(
         .max(AcKw::ZERO)
         .min(params.max_power_kw);
 
+    // PV the plant refused this MTU. A no-export block (Import) curtails its whole spill.
+    // Otherwise the overflow is what does not fit under the AC rating once the load, the
+    // action's export, the pack's discharge and the import have taken their share — the
+    // above-cap surplus a full pack cannot store. This is the waste the curtailment price
+    // charges, so the DP opens headroom ahead of a peak rather than letting it vanish.
+    let other_ac = (pv_to_load
+        + pv_export
+        + params.battery_to_grid.through(from_pack)
+        + from_import
+        - slot.load_kw)
+        .max(AcKw::ZERO);
+    let overflow_room = (params.max_power_kw - other_ac).max(AcKw::ZERO);
+    let curtailed_kw = match action {
+        Action::Import { .. } => spill_ac,
+        Action::Idle | Action::Export { .. } => (pv_overflow - overflow_room).max(AcKw::ZERO),
+    };
+
     Flow {
         energy_after_kwh: energy_kwh + to_pack * hours - from_pack * hours,
         ac_out_kwh: ac_out * hours,
         // Everything the meter supplied: the part that went straight to the bus because the
         // site load needed it, plus the part the charger actually took.
         ac_in_kwh: (from_import + params.grid_to_battery.input_for(grid_charge)) * hours,
+        curtailed_kwh: curtailed_kw * hours,
     }
 }
 
@@ -1192,6 +1230,9 @@ mod tests {
             soc_ceiling: 0.80,
             energy_step_kwh: DcKwh::new(0.32),
             action_step_kw: AcKw::new(1.2),
+            // Zero keeps the legacy tests' economics unchanged; the curtailment-aware
+            // behaviour has its own tests below that set a positive price.
+            curtailment_price: CzkPerKwh::ZERO,
             terminal: TerminalValue {
                 czk_per_kwh: CzkPerKwh::new(7.974),
             },
@@ -1890,6 +1931,71 @@ mod tests {
             "a hold sells the same surplus, got {}",
             held.ac_out_kwh
         );
+    }
+
+    /// A 16 kW array against the 12 kW interface, one hour, plant load 0.117 kW.
+    fn saturating_slot() -> Slot {
+        Slot {
+            mtu: Mtu {
+                start: T0,
+                hours: Hours::new(1.0),
+            },
+            price_sell: CzkPerKwh::new(5.0),
+            price_buy: CzkPerKwh::new(5.0),
+            pv_kw: DcKw::new(16.0),
+            load_kw: AcKw::new(0.117),
+        }
+    }
+
+    #[test]
+    fn pv_above_the_export_cap_curtailed_against_a_full_pack() {
+        // 25.6 kWh = the 80 % ceiling of a 32 kWh pack: no headroom, so the DC sink is shut
+        // and everything above the 12 kW AC rating is refused. 16 kW − 0.117 load ≈ 15.88
+        // spills, 12 exports, ~3.88 curtails.
+        let flow = next_energy(DcKwh::new(25.6), &saturating_slot(), Action::Idle, &params());
+        assert!(
+            (flow.ac_out_kwh.get() - 12.0).abs() < 1e-6,
+            "export pins at the interface rating, got {}",
+            flow.ac_out_kwh
+        );
+        assert!(
+            flow.curtailed_kwh.get() > 3.0,
+            "the above-cap surplus must be counted as curtailed, got {}",
+            flow.curtailed_kwh
+        );
+    }
+
+    #[test]
+    fn headroom_absorbs_the_above_cap_surplus() {
+        // 16 kWh (50 %): 9.6 kWh of headroom under the ceiling. The pack takes 9.6 kW of the
+        // 15.88 kW spill, leaving 6.28 kW to export — under the 12 kW cap, so nothing curtails.
+        let flow = next_energy(DcKwh::new(16.0), &saturating_slot(), Action::Idle, &params());
+        assert!(
+            flow.curtailed_kwh.get() < 1e-9,
+            "headroom absorbs the surplus, got {}",
+            flow.curtailed_kwh
+        );
+        assert!(
+            (flow.energy_after_kwh.get() - 25.6).abs() < 1e-6,
+            "the pack fills to the ceiling, got {}",
+            flow.energy_after_kwh
+        );
+    }
+
+    #[test]
+    fn curtailment_price_charges_the_refused_pv() {
+        let slot = saturating_slot();
+        let flow = next_energy(DcKwh::new(25.6), &slot, Action::Idle, &params());
+        let mut priced = params();
+        priced.curtailment_price = CzkPerKwh::new(8.0);
+        let free = money(&slot, &flow, &params());
+        let charged = money(&slot, &flow, &priced);
+        let penalty = free - charged;
+        assert!(
+            (penalty.get() - 8.0 * flow.curtailed_kwh.get()).abs() < 1e-6,
+            "the penalty is price × curtailed, got {penalty}"
+        );
+        assert!(penalty.get() > 20.0, "wasting ~3.9 kWh costs real money, got {penalty}");
     }
 
     #[test]

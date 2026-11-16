@@ -221,6 +221,45 @@ pub fn desired(plan: &Plan, now: i64, params: &ActuatorParams) -> Desired {
     }
 }
 
+/// The governor's spill: hold the pack at the ceiling and export PV surplus.
+///
+/// `selling_first` with **every** slot at the ceiling and a 0 W discharge cap. Measured
+/// 2026-11-07 (all six slots at 100 %, 0 W): the pack sat flat while PV exported — the mode
+/// sells the PV and never charges the pack. All six targets equal removes the next-slot
+/// lookahead that dumped the pack on 2026-11-02, so the pack holds at the ceiling instead of
+/// charging to BMS-full as a `zero_export_load` hold does. The slot times are the current grid
+/// step onward; the targets are identical, so a duplicate start near midnight is inert.
+pub fn spill_desired(now: i64, params: &ActuatorParams) -> Desired {
+    let zone = prague().expect("the Prague zone is compiled in");
+    let ceiling = params.soc_ceiling_pct.round().clamp(0.0, 100.0) as u8;
+    let mut blocks = Vec::with_capacity(SLOTS);
+    let mut start = on_grid(&hhmm(now, &zone));
+    for _ in 0..SLOTS {
+        blocks.push(Block {
+            start: start.clone(),
+            soc: ceiling,
+            power_w: 0,
+            charge: Charge::Off,
+        });
+        start = bump(&start, SLOT_GRID_MINUTES)
+            .map(|start| on_grid(&start))
+            .unwrap_or_else(|| LAST_GRID_START.to_string());
+    }
+    Desired {
+        blocks,
+        // selling_first: the pack may reach the meter, but the 0 W slot caps block discharge
+        // and the ceiling target holds it. PV surplus exports through solar_sell/max_sell.
+        sell_from_pack: true,
+        sell_surplus: true,
+        max_sell_w: MAX_SELL_W as u16,
+        grid_charge: false,
+        charge_current_a: 0,
+        charge_current_limited: false,
+        charge_limit_a: 0,
+        charge_requested_kw: 0.0,
+    }
+}
+
 /// Unix seconds of the next local midnight: the end of the civil day the slots describe.
 fn next_midnight(now: i64, zone: &TimeZone) -> i64 {
     let today = Timestamp::from_second(now)
@@ -684,6 +723,45 @@ mod tests {
         );
         assert!(desired.sell_surplus, "the surplus still leaves");
         assert_eq!(desired.max_sell_w, 12000, "the interface rating, not zero");
+    }
+
+    #[test]
+    fn a_spill_holds_every_slot_at_the_ceiling_and_arms_selling_first_last() {
+        // The governor's spill: selling_first with all six targets equal removes the
+        // next-slot lookahead that dumped the pack on 2026-11-02, and the 0 W cap holds the
+        // pack while PV surplus exports (measured 2026-11-07: flat pack, 12 kW to the meter).
+        let desired = spill_desired(T0, &params());
+        assert_eq!(desired.blocks.len(), SLOTS);
+        for block in &desired.blocks {
+            assert_eq!(block.soc, 80, "every slot at the ceiling, no lower lookahead");
+            assert_eq!(block.power_w, 0, "no discharge: the pack holds");
+            assert_eq!(block.charge, Charge::Off);
+        }
+        assert!(desired.sell_from_pack, "spill runs selling_first to export PV");
+        assert!(desired.sell_surplus);
+        assert_eq!(desired.max_sell_w, 12000);
+        assert!(!desired.grid_charge);
+
+        let targets = targets(&desired);
+        let index = |name: &str| {
+            targets
+                .iter()
+                .position(|target| target.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        assert_eq!(
+            targets.last().unwrap().name, "work_mode",
+            "selling_first is armed only after every slot is in place"
+        );
+        assert_eq!(targets.last().unwrap().expect, Value::Text("selling_first".into()));
+        assert!(index("tou_power_1") < index("tou_soc_1"));
+        for n in 1..=SLOTS {
+            let target = targets
+                .iter()
+                .find(|target| target.name == format!("tou_soc_{n}"))
+                .unwrap();
+            assert_eq!(target.write, serde_json::json!(80));
+        }
     }
 
     #[test]

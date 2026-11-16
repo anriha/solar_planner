@@ -59,6 +59,7 @@ fn live_params(action_step_kw: f64, energy_step_kwh: f64) -> Params {
         soc_ceiling: 0.80,
         energy_step_kwh: DcKwh::new(energy_step_kwh),
         action_step_kw: AcKw::new(action_step_kw),
+        curtailment_price: CzkPerKwh::new(7.974),
         terminal: TerminalValue {
             czk_per_kwh: CzkPerKwh::new(7.974),
         },

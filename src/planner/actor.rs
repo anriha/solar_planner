@@ -23,10 +23,11 @@ use crate::bus::{BusActor, WriteRegister};
 use crate::directives::{Directives, DirectivesActor, GetCurrent, PathCurve};
 use crate::planner::actuator::{self, ActuatorParams};
 use crate::planner::forecast::PvSource;
+use crate::planner::governor::{self, GovernorParams};
 use crate::planner::horizon::{HorizonActor, HorizonError, HorizonParams};
 use crate::planner::price::PriceSource;
 use crate::planner::{
-    BOOTSTRAP_TERMINAL_CZK_PER_KWH, CAPACITY_KWH, EfficiencyCurve, Params, Plan, PlanError,
+    Action, BOOTSTRAP_TERMINAL_CZK_PER_KWH, CAPACITY_KWH, EfficiencyCurve, Params, Plan, PlanError,
     Problem, TerminalValue, solve,
 };
 use crate::state::{GetState, StateActor, Update};
@@ -95,6 +96,7 @@ pub fn device_params(directives: &Directives, terminal: TerminalValue) -> Params
         soc_ceiling: directives.soc_ceiling.get() / 100.0,
         energy_step_kwh: DcKwh::new(directives.energy_step_kwh),
         action_step_kw: AcKw::new(directives.action_step_kw),
+        curtailment_price: CzkPerKwh::new(directives.curtailment_price_czk_per_kwh.get()),
         terminal,
     }
 }
@@ -124,6 +126,21 @@ pub fn actuator_params(directives: &Directives) -> ActuatorParams {
         soc_floor_pct: directives.soc_floor.get(),
         soc_ceiling_pct: directives.soc_ceiling.get(),
         battery_charge_kw: directives.battery_charge_kw,
+    }
+}
+
+/// The governor's slice of policy: the band it enforces on the measured SOC and the
+/// climatological headroom reserve. Device facts (capacity) are constants; the rest is
+/// directives, retunable from HA without a rebuild.
+pub fn governor_params(directives: &Directives) -> GovernorParams {
+    GovernorParams {
+        soc_floor_pct: directives.soc_floor.get(),
+        soc_ceiling_pct: directives.soc_ceiling.get(),
+        capacity_kwh: CAPACITY_KWH,
+        battery_discharge_kw: directives.battery_discharge_kw,
+        reserve_headroom_kwh: directives.reserve_headroom_kwh,
+        reserve_start_hour: directives.reserve_start_hour,
+        reserve_end_hour: directives.reserve_end_hour,
     }
 }
 
@@ -262,8 +279,35 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         observed: &std::collections::BTreeMap<String, crate::decode::Value>,
         directives: &Directives,
         now: i64,
+        soc_pct: f64,
     ) -> bool {
-        let desired = actuator::desired(plan, now, &actuator_params(directives));
+        let params = actuator_params(directives);
+        // The governor enforces the band on the measured SOC, independent of the plan's
+        // forecast-driven intent. A planned sell already drains the pack, so it is allowed;
+        // a hold or buy at the ceiling is replaced by a spill, and a reserve window opens
+        // headroom ahead of a peak. The published plan stays the solved intent; the override
+        // is logged here and belongs in the ledger (board-aru) as a plan-vs-actual deviation.
+        let plan_selling = matches!(
+            plan.steps.first().map(|step| step.action),
+            Some(Action::Export { kw }) if kw.get() > 0.0
+        );
+        let desired = match governor::decide(soc_pct, plan_selling, now, &governor_params(directives)) {
+            governor::Govern::Spill => {
+                eprintln!("[governor] SOC {soc_pct:.1}% at ceiling; spill (hold + export surplus)");
+                actuator::spill_desired(now, &params)
+            }
+            governor::Govern::ReserveSell { kw } => {
+                eprintln!(
+                    "[governor] SOC {soc_pct:.1}% above reserve target; pre-peak discharge {kw:.1} kW"
+                );
+                let mut governed = plan.clone();
+                if let Some(step) = governed.steps.first_mut() {
+                    step.action = Action::Export { kw: AcKw::new(kw) };
+                }
+                actuator::desired(&governed, now, &params)
+            }
+            governor::Govern::FollowPlan => actuator::desired(plan, now, &params),
+        };
         if desired.charge_current_limited {
             eprintln!(
                 "[planner] grid charge {:.1} kW exceeds the {:.1} A charge limit; commanding {} A",
@@ -403,7 +447,9 @@ impl<P: PriceSource, F: PvSource> PlannerActor<P, F> {
         // compared against a stale register image is worse than no write. Switching the
         // actuator off is an instruction to stop, so it disarms on the transition.
         if writes_allowed(&directives, payload.link_ok) {
-            self.armed = self.apply(&plan, &payload.values, &directives, now).await;
+            self.armed = self
+                .apply(&plan, &payload.values, &directives, now, signals.soc_fraction() * 100.0)
+                .await;
         } else {
             if self.armed && payload.link_ok {
                 self.disarm(&payload.values).await;
